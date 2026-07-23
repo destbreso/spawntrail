@@ -1,0 +1,69 @@
+{
+  "name": "logscope",
+  "version": "1.0.0",
+  "description": "Contextual logging for Node via AsyncLocalStorage and Mapped Diagnostic Context (MDC). Attach request-scoped context to every log line, with any logger (winston, pino) and any framework (express, fastify, koa). Zero dependencies, TypeScript-first.",
+  "author": {
+    "name": "David Estevez",
+    "email": "dev.destbreso@gmail.com"
+  },
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "logging",
+    "logger",
+    "context",
+    "contextual-logging",
+    "mdc",
+    "mapped-diagnostic-context",
+    "asynclocalstorage",
+    "async-hooks",
+    "correlation-id",
+    "request-id",
+    "trace",
+    "tracing",
+    "winston",
+    "pino",
+    "express",
+    "middleware",
+    "structured-logging"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/destbreso/logscope.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "pino": "^8.17.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0",
+    "winston": "^3.11.0"
+  }
+}

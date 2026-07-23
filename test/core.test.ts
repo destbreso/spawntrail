@@ -36,6 +36,16 @@ describe("SpawnTrail core", () => {
     });
   });
 
+  it("run(fn) opens a scope with no seed bindings", () => {
+    const s = new SpawnTrail();
+    const out = s.run(() => {
+      s.put("k", 1);
+      return s.get("k");
+    });
+    expect(out).toBe(1);
+    expect(s.get("k")).toBeUndefined(); // scope closed
+  });
+
   it("nested scopes inherit parent context; child writes do not leak up", () => {
     const s = new SpawnTrail();
     s.run({ a: 1 }, () => {

@@ -71,8 +71,13 @@ export class SpawnTrail {
     this.base = { ...(options.defaults ?? {}) };
   }
 
+  /** Open a context scope and run `fn` inside it. */
+  run<T>(fn: () => T): T;
   /** Open a context scope seeded with `bindings` (merged over any parent scope) and run `fn` inside it. */
-  run<T>(bindings: Bindings | undefined, fn: () => T): T {
+  run<T>(bindings: Bindings | undefined, fn: () => T): T;
+  run<T>(bindingsOrFn: Bindings | undefined | (() => T), maybeFn?: () => T): T {
+    const fn = (typeof bindingsOrFn === "function" ? bindingsOrFn : maybeFn) as () => T;
+    const bindings = typeof bindingsOrFn === "function" ? undefined : bindingsOrFn;
     const parent = this.als.getStore();
     const seed = deepMerge(parent ? parent.bindings : this.base, bindings ?? {});
     return this.als.run({ bindings: seed }, fn);

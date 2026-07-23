@@ -74,7 +74,7 @@ logger.info("hello"); // carries the current context
 import { trail } from "spawntrail";
 
 // fastify
-fastify.addHook("onRequest", (req, reply, done) => trail.run({}, () => { trail.ensureId(); done(); }));
+fastify.addHook("onRequest", (req, reply, done) => trail.run(() => { trail.ensureId(); done(); }));
 
 // or wrap any unit of work: a queue job, a cron tick, a script
 await trail.run({ jobId }, async () => {

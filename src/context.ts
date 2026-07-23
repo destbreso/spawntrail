@@ -1,5 +1,5 @@
 /**
- * context.ts: LogScope, the AsyncLocalStorage-backed context engine.
+ * context.ts: SpawnTrail, the AsyncLocalStorage-backed context engine.
  *
  * One AsyncLocalStorage holds the per-scope context. `run()` opens a scope;
  * every async continuation started inside it inherits the same store, so the
@@ -18,7 +18,7 @@ export interface Store {
   bindings: Bindings;
 }
 
-export interface LogScopeOptions {
+export interface SpawnTrailOptions {
   /** Key under which the correlation id is stored. Default `"requestId"`. */
   idKey?: string;
   /** Factory for a fresh correlation id. Default `crypto.randomUUID`. */
@@ -27,7 +27,7 @@ export interface LogScopeOptions {
   defaults?: Bindings;
 }
 
-// Minimal structural types, so logscope depends on no framework or logger package.
+// Minimal structural types, so spawntrail depends on no framework or logger package.
 
 export interface RequestLike {
   headers?: Record<string, string | string[] | undefined>;
@@ -59,13 +59,13 @@ export interface ChildLogger {
   [key: string]: unknown;
 }
 
-export class LogScope {
+export class SpawnTrail {
   private readonly als = new AsyncLocalStorage<Store>();
   private readonly idKey: string;
   private readonly idFactory: () => string;
   private base: Bindings;
 
-  constructor(options: LogScopeOptions = {}) {
+  constructor(options: SpawnTrailOptions = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
     this.base = { ...(options.defaults ?? {}) };
@@ -176,7 +176,7 @@ export class LogScope {
   /** Express/connect middleware: opens a scope per request, seeds a correlation id and optional bindings. */
   express(options: ExpressOptions = {}) {
     const scope = this;
-    return function logscopeMiddleware(req: RequestLike, res: ResponseLike, next: NextLike): void {
+    return function spawntrailMiddleware(req: RequestLike, res: ResponseLike, next: NextLike): void {
       let provided = options.id?.(req);
       if (!provided && options.idHeader) {
         const raw = req.headers?.[options.idHeader.toLowerCase()];

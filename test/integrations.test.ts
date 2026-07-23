@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Writable } from "node:stream";
 import winston from "winston";
 import pino from "pino";
-import { LogScope, type ChildLogger } from "../src/index";
+import { SpawnTrail, type ChildLogger } from "../src/index";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -21,7 +21,7 @@ function collector() {
 
 describe("winston format", () => {
   it("merges the live context, and call-site fields win", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const { lines, stream } = collector();
     const logger = winston.createLogger({
       format: winston.format.combine(s.winston(), winston.format.json()),
@@ -41,7 +41,7 @@ describe("winston format", () => {
   });
 
   it("adds nothing outside a scope", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const { lines, stream } = collector();
     const logger = winston.createLogger({
       format: winston.format.combine(s.winston(), winston.format.json()),
@@ -56,7 +56,7 @@ describe("winston format", () => {
 
 describe("pino mixin", () => {
   it("carries the live context into every record", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const { lines, stream } = collector();
     const logger = pino({ mixin: s.pino(), base: null }, stream);
 
@@ -73,7 +73,7 @@ describe("pino mixin", () => {
 
 describe("bind() fallback", () => {
   it("children any .child() logger with the current context per call", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const calls: Array<Record<string, unknown>> = [];
     // a minimal fake logger with a child() interface
     const fake = {

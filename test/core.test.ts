@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { LogScope } from "../src/index";
+import { SpawnTrail } from "../src/index";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-describe("LogScope core", () => {
+describe("SpawnTrail core", () => {
   it("put/get inside a scope, empty outside", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     expect(s.get("user")).toBeUndefined();
     s.run({}, () => {
       s.put("user", "alice");
@@ -17,7 +17,7 @@ describe("LogScope core", () => {
   });
 
   it("supports dot-path put/get/del on nested structure", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     s.run({}, () => {
       s.put("http.method", "GET");
       s.put("http.route", "/users/:id");
@@ -29,7 +29,7 @@ describe("LogScope core", () => {
   });
 
   it("seeds bindings via run() and merges over process defaults", () => {
-    const s = new LogScope({ defaults: { service: "api" } });
+    const s = new SpawnTrail({ defaults: { service: "api" } });
     s.run({ requestId: "r1" }, () => {
       expect(s.get("service")).toBe("api");
       expect(s.get("requestId")).toBe("r1");
@@ -37,7 +37,7 @@ describe("LogScope core", () => {
   });
 
   it("nested scopes inherit parent context; child writes do not leak up", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     s.run({ a: 1 }, () => {
       s.put("b", 2);
       s.run({ c: 3 }, () => {
@@ -52,13 +52,13 @@ describe("LogScope core", () => {
   });
 
   it("ensureId uses a provided id or generates one, and id() reads it", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     s.run({}, () => {
       expect(s.ensureId("given-1")).toBe("given-1");
       expect(s.id()).toBe("given-1");
       expect(s.ensureId("ignored")).toBe("given-1"); // idempotent
     });
-    const t = new LogScope();
+    const t = new SpawnTrail();
     t.run({}, () => {
       const generated = t.ensureId();
       expect(generated).toMatch(/[0-9a-f-]{36}/);
@@ -67,7 +67,7 @@ describe("LogScope core", () => {
   });
 
   it("get() survives across awaits within the same scope", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     await s.run({ requestId: "keep" }, async () => {
       await delay(5);
       expect(s.get("requestId")).toBe("keep");

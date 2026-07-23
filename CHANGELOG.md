@@ -2,12 +2,12 @@
 
 ## 1.0.0
 
-First release of **logscope**, the successor to `express-session-logger` and
+First release of **spawntrail**, the successor to `express-session-logger` and
 `@one-broker-services/winston-session` (both 2021). It merges their ideas onto a
 modern core and supersedes them.
 
 ### Core
-- `LogScope`: an `AsyncLocalStorage`-backed context engine. Per-scope isolation
+- `SpawnTrail`: an `AsyncLocalStorage`-backed context engine. Per-scope isolation
   with no global singleton (the flaw of winston-session) and no patch-based CLS
   (cls-hooked / continuation-local-storage, which winston-session depended on but
   never actually used).
@@ -34,7 +34,7 @@ modern core and supersedes them.
 - ~6 KB.
 
 ### Migration from `express-session-logger`
-- `contextMiddleware(opts)` becomes `logscope.express(opts)`; the `logger` proxy
-  becomes any logger configured with `logscope.winston()` / `logscope.pino()`, or
-  `logscope.bind(logger)`.
+- `contextMiddleware(opts)` becomes `spawntrail.express(opts)`; the `logger` proxy
+  becomes any logger configured with `spawntrail.winston()` / `spawntrail.pino()`, or
+  `spawntrail.bind(logger)`.
 - The single global logger is gone; context is now correctly isolated per request.

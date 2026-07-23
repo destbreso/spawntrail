@@ -1,12 +1,12 @@
 /**
- * logscope: contextual logging for Node via AsyncLocalStorage + MDC.
+ * spawntrail: contextual logging for Node via AsyncLocalStorage + MDC.
  *
- * - `logscope`  a ready-to-use shared instance for simple apps.
- * - `LogScope`  the class, to create isolated instances.
+ * - `trail` / `spawntrail`  a ready-to-use shared instance (same object; `trail` is the short call-site name).
+ * - `SpawnTrail`  the class, to create isolated instances.
  */
-export { LogScope } from "./context";
+export { SpawnTrail } from "./context";
 export type {
-  LogScopeOptions,
+  SpawnTrailOptions,
   Store,
   ExpressOptions,
   RequestLike,
@@ -18,7 +18,10 @@ export type {
 export type { Bindings } from "./mdc";
 export { getPath, setPath, delPath, deepMerge } from "./mdc";
 
-import { LogScope } from "./context";
+import { SpawnTrail } from "./context";
 
-/** Default shared LogScope instance. Import this for single-instance apps. */
-export const logscope = new LogScope();
+/** Default shared instance. `trail` is the short, ergonomic name for call sites. */
+export const trail = new SpawnTrail();
+
+/** Alias of `trail`, for those who prefer the full package name. */
+export const spawntrail = trail;

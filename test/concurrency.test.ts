@@ -1,17 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { LogScope } from "../src/index";
+import { SpawnTrail } from "../src/index";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * The reason logscope exists. The 2021 winston-session used a singleton context,
+ * The reason spawntrail exists. The 2021 winston-session used a singleton context,
  * so two concurrent requests shared one object and their context bled together.
  * With AsyncLocalStorage each scope is isolated even when the async work is
  * heavily interleaved. This is the test the old design could not pass.
  */
 describe("concurrency isolation", () => {
   it("keeps 50 interleaved scopes from bleeding into each other", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const N = 50;
 
     const results = await Promise.all(
@@ -37,7 +37,7 @@ describe("concurrency isolation", () => {
   });
 
   it("a put in one scope is invisible to a sibling scope", async () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     let sawInB: unknown = "unset";
 
     await Promise.all([

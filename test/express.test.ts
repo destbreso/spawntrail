@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { LogScope, type RequestLike, type ResponseLike } from "../src/index";
+import { SpawnTrail, type RequestLike, type ResponseLike } from "../src/index";
 
 function fakeRes() {
   const headers: Record<string, string> = {};
@@ -13,7 +13,7 @@ function fakeRes() {
 
 describe("express middleware", () => {
   it("opens a scope per request and seeds a generated id", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const mw = s.express();
     const { res } = fakeRes();
 
@@ -27,7 +27,7 @@ describe("express middleware", () => {
   });
 
   it("reads an incoming id from a header and echoes it back", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const mw = s.express({ idHeader: "x-request-id", setResponseHeader: "x-request-id" });
     const { res, headers } = fakeRes();
     const req: RequestLike = { headers: { "x-request-id": "incoming-123" } };
@@ -42,7 +42,7 @@ describe("express middleware", () => {
   });
 
   it("derives bindings from the request", () => {
-    const s = new LogScope();
+    const s = new SpawnTrail();
     const mw = s.express({
       id: () => "fixed",
       bindings: (req) => ({ ua: req.headers?.["user-agent"] }),

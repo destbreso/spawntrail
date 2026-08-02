@@ -8,11 +8,20 @@
  *
  * The logger integrations inject the live context at LOG TIME (winston format /
  * pino mixin), so a `put()` in the middle of a request is reflected in later
- * logs — unlike childing the logger once at request start.
+ * logs, unlike childing the logger once at request start.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { type Bindings, getPath, setPath, delPath, deepMerge, mergeMissing } from "./mdc";
+import {
+  type Bindings,
+  getPath,
+  setPath,
+  delPath,
+  clone,
+  deepMerge,
+  emptyBindings,
+  mergeMissing,
+} from "./mdc";
 
 export interface Store {
   bindings: Bindings;
@@ -68,7 +77,11 @@ export class SpawnTrail {
   constructor(options: SpawnTrailOptions = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
-    this.base = { ...(options.defaults ?? {}) };
+    // Not a spread: object spread copies `__proto__` from a JSON-parsed object
+    // as an OWN property, which would put the store outside its own invariant
+    // before a single call was made. Merging into an empty object applies the
+    // same key filter and the same copy every other entry point applies.
+    this.base = deepMerge({}, options.defaults ?? {});
   }
 
   /** Open a context scope and run `fn` inside it. */
@@ -83,26 +96,57 @@ export class SpawnTrail {
     return this.als.run({ bindings: seed }, fn);
   }
 
-  /** The merged bindings visible right now (current scope, or process defaults outside any scope). */
+  /**
+   * The merged bindings visible right now (current scope, or process defaults
+   * outside any scope).
+   *
+   * Returns a deep copy rather than the store itself, so a caller cannot write
+   * context without going through `put()`.
+   *
+   * The copy is the whole guarantee, and it is deliberately not frozen. Freezing
+   * adds nothing a copy has not already provided, and it takes something away:
+   * `Object.assign(trail.bindings(), extra)` is an ordinary way to build an
+   * error report, and against a frozen object that line throws in an ESM caller
+   * and silently does nothing in a CommonJS one. A patch release is the wrong
+   * place to turn working code into a runtime error, and "the same line behaves
+   * differently depending on your module system" is the wrong contract anywhere.
+   *
+   * Note that this is a snapshot, not a live handle: something that grabs it at
+   * scope start and reads it later sees the context as it was.
+   */
   bindings(): Bindings {
-    const store = this.als.getStore();
-    return store ? store.bindings : this.base;
+    return clone(this.target());
   }
 
+  /**
+   * The live store, for internal readers only.
+   *
+   * The logger integrations call this rather than `bindings()` because they run
+   * once per log record and only ever read.
+   */
   private target(): Bindings {
     const store = this.als.getStore();
     return store ? store.bindings : this.base;
   }
 
-  /** Add/overwrite a value at a dot-path. Inside a scope it is scope-local; outside, it sets a process default. */
+  /**
+   * Add/overwrite a value at a dot-path. Inside a scope it is scope-local;
+   * outside, it sets a process default.
+   *
+   * The value is copied on the way in. This is the only place caller data enters
+   * a store that is not already a merge, so it is where the invariant is bought:
+   * without the copy the store aliases the caller's object, and then
+   * `put("user", u)` followed by `put("user.role", "admin")` writes `role` into
+   * the application's own `u`.
+   */
   put(path: string, value: unknown): this {
-    setPath(this.target(), path, value);
+    setPath(this.target(), path, clone(value));
     return this;
   }
 
   /** Read the whole context, or a single dot-path. */
   get(path?: string): unknown {
-    return path === undefined ? this.bindings() : getPath(this.bindings(), path);
+    return path === undefined ? this.bindings() : getPath(this.target(), path);
   }
 
   /** Remove a value at a dot-path. */
@@ -114,14 +158,14 @@ export class SpawnTrail {
   /** Clear the current scope's context (or the process defaults outside a scope). */
   clear(): this {
     const store = this.als.getStore();
-    if (store) store.bindings = {};
-    else this.base = {};
+    if (store) store.bindings = emptyBindings();
+    else this.base = emptyBindings();
     return this;
   }
 
   /** The current correlation id, if any. */
   id(): string | undefined {
-    const v = getPath(this.bindings(), this.idKey);
+    const v = getPath(this.target(), this.idKey);
     return typeof v === "string" ? v : undefined;
   }
 
@@ -147,20 +191,32 @@ export class SpawnTrail {
     const scope = this;
     return {
       transform(info: Record<string, unknown>): Record<string, unknown> {
-        mergeMissing(info, scope.bindings());
+        mergeMissing(info, scope.target());
         return info;
       },
     };
   }
 
-  /** A pino mixin returning the current context for every record. */
+  /**
+   * A pino mixin returning the current context for every record.
+   *
+   * Returns a copy, not the store. pino's default mixin merge strategy is
+   * `Object.assign(mixinObject, mergeObject)`, so it writes the fields of every
+   * log call INTO whatever the mixin returned. Handing it the live store turned
+   * one `log.info({ pan }, "...")` into permanent context, and a log line
+   * emitted outside any scope wrote into the process defaults for good.
+   */
   pino(): () => Bindings {
-    return () => this.bindings();
+    return () => clone(this.target());
   }
 
   /**
    * Wrap any `.child()` logger so each call carries the live context. Fallback for
    * loggers without a format/mixin hook; prefer `winston()` / `pino()` for those.
+   *
+   * Hands the child logger a copy. Unlike the format and the mixin, this passes
+   * the object to third-party code that keeps it (winston's `child()` retains
+   * its bindings argument), so it is not a read-only internal path.
    */
   bind<L extends ChildLogger>(logger: L): L {
     const scope = this;
@@ -169,7 +225,7 @@ export class SpawnTrail {
         if (prop === "child" || typeof prop === "symbol") {
           return Reflect.get(target, prop, receiver);
         }
-        const child = target.child(scope.bindings());
+        const child = target.child(clone(scope.target()));
         const value = Reflect.get(child, prop, child);
         return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(child) : value;
       },

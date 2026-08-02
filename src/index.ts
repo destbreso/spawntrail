@@ -15,8 +15,21 @@ export type {
   WinstonFormatLike,
   ChildLogger,
 } from "./context";
-export type { Bindings } from "./mdc";
-export { getPath, setPath, delPath, deepMerge } from "./mdc";
+export type { Bindings, ViolationHandler, ViolationReason } from "./mdc";
+export {
+  getPath,
+  setPath,
+  delPath,
+  deepMerge,
+  clone,
+  isForbiddenKey,
+  setViolationHandler,
+  resetViolationWarning,
+  CLONE_DEPTH_LIMIT,
+  CLONE_NODE_LIMIT,
+  TRUNCATED,
+  UNREADABLE,
+} from "./mdc";
 
 import { SpawnTrail } from "./context";
 

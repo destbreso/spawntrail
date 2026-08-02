@@ -124,15 +124,39 @@ The shape to look for is always the same: **one unit of work, many async frames,
 
 ---
 
+## What a context holds, and the one rule about it
+
+**Nothing in a context is an object you also hold.** Values are copied on the way in, at every level, on every path: `run()`, `put()`, `setDefaults()`, and everything the library hands back out. That single rule is what makes the rest true. Two scopes cannot share a node, so a write in one request can never appear in another. A log record is a real snapshot, so mutating a value afterwards cannot rewrite a line that was already emitted. And a dot-path walk only ever steps into objects this library built, so `put()` cannot arrive somewhere that is not your context, whatever the path says.
+
+**Values that are not plain objects or arrays are kept as they are.** An `Error`, a `Date`, a class instance, a socket: copying those would either fail or produce something that is not the thing you logged, so they are stored by reference and never walked into. A circular value is fine, and so is the same object appearing in twenty places: both are handled once, not once per route to them.
+
+**`__proto__` is the one key name that is refused,** as a path segment and as a key in any value, because assigning it reassigns a prototype instead of storing data and `JSON.parse` produces it as an ordinary own key. A refusal is silent by default; pass a function to `setViolationHandler()` to count them, log them, or fail a test on them. Every other key name, `constructor` and `prototype` included, is ordinary data.
+
+**Copying is bounded.** A value is copied to a depth of `CLONE_DEPTH_LIMIT` (32) and a total of `CLONE_NODE_LIMIT` (10,000) objects per operation, after which the rest is replaced by the string `"[spawntrail: truncated]"` and the handler is notified. A property that throws when read becomes `"[spawntrail: unreadable]"` rather than an exception out of your log call. Both bounds are far above any context worth keeping, and they exist so that a value nobody meant to log cannot take down the process.
+
+---
+
 ## What it costs
 
-**Opening a scope copies the context.** `run()` deep-merges its seed over the parent bindings and stores the result, which is what makes a child's writes invisible to its parent. The cost tracks the size of the context you keep, so a context of a few identifiers is nothing, and a context holding a large object is copied on every nested scope.
+Measured on Node 22, one machine, against a context of four identifiers and against a request-shaped one (`{ req: { id, headers, user: { id, org } } }`).
 
-**Injection is a merge per log record.** The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one, and it copies each value as it goes rather than sharing it: mutating the context later cannot retroactively change a record that was already emitted. The pino mixin is the cheap one, since pino asks for the object and serializes it itself.
+| | |
+|---|---|
+| `run()`, four flat keys | ~240 ns |
+| `run()`, request-shaped | ~1.0 µs |
+| `get("requestId")` | ~30 ns |
+| `put("a.b", 1)` | ~67 ns |
+| winston format, per record | ~310 ns |
+| pino mixin, per record | ~390 ns |
+| `bindings()` | ~360 ns |
+
+**Opening a scope copies the context.** `run()` deep-merges its seed over the parent bindings and stores the result, which is what makes a child's writes invisible to its parent. The cost tracks the size of the context you keep, so a context of a few identifiers is nothing, and a context holding a large object is copied on every nested scope. This is the one number worth watching, because it is paid once per request plus once per nested segment.
+
+**Injection is a merge per log record.** The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Both are well under the cost the logger itself pays to serialize the line.
 
 **`bind()` is the expensive path, on purpose.** The proxy calls the wrapped logger's `child()` on every property access, so `log.info(...)` in a loop allocates a child per call, and the real cost depends on how heavy that logger's `child()` is. Prefer `winston()` or `pino()` where they exist; `bind()` buys universality with allocations.
 
-Two behaviors are worth knowing before they surprise you. `put()` called outside any scope writes to the same process-wide bindings `setDefaults()` fills, so the value is visible in every scope opened afterwards; that is intentional for configuration like a service name, and easy to trigger by accident from a call site you thought was inside a request. And `clear()` inside a scope empties everything visible there, process defaults included, until that scope ends.
+Three behaviors are worth knowing before they surprise you. `put()` called outside any scope writes to the same process-wide bindings `setDefaults()` fills, so the value is visible in every scope opened afterwards; that is intentional for configuration like a service name, and easy to trigger by accident from a call site you thought was inside a request. `clear()` inside a scope empties everything visible there, process defaults included, until that scope ends. And `bindings()` is a snapshot, not a live handle: something that grabs it at scope start and reads it later sees the context as it was, not as it is.
 
 ---
 
@@ -187,6 +211,10 @@ scope.bind(logger)        // wrap any .child() logger (fallback)
 
 // framework
 scope.express(options)    // express/connect middleware
+
+// observing refusals
+setViolationHandler(fn)   // called with { reason, key?, path? } on every refusal
+                          // reason: "forbidden-key" | "truncated" | "unreadable" | "invalid-path"
 ```
 
 Nested `run()` calls act as **segments**: a child scope inherits the parent context and its own writes do not leak back up.

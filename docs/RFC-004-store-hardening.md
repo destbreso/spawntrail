@@ -1,6 +1,8 @@
 # RFC-004: Store hardening (paths, cycles, and what may live in a context)
 
-**Status**: proposed, not started. Fixes [FINDINGS](./FINDINGS.md) F1, F2, F3 and F4. This is the highest-priority RFC: two of the four are reproducible defects in 1.0.0, one of them security-classified.
+**Status**: implemented in 1.1.0 and 2.0.0. Fixes [FINDINGS](./FINDINGS.md) F1, F2, F3 and F4.
+
+Two of the four proposals below were adopted as written (2.1 forbidden segments, 2.4 `bindings()` as a view). Two were not, and the reasons are worth carrying into the next RFC. The 2.3 depth ceiling, implemented literally, kept deep values BY REFERENCE, which broke scope isolation and re-opened the pollution vector eight segments in; the shipped design never shares a container and bounds WORK rather than depth. And 2.2's null-prototype store was rejected in favour of a plain object plus one denylisted key, because the safety comes from the copy rule rather than from the prototype. Section 3's open question (what may live in a context) is settled: non-container values are kept by reference in-process and cannot cross a boundary, which is the projection rule [RFC-001](./RFC-001-boundary-snapshot-restore.md) inherits.
 
 ## 1. The pain
 

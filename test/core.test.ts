@@ -23,8 +23,9 @@ describe("SpawnTrail core", () => {
       s.put("http.route", "/users/:id");
       expect(s.get("http")).toEqual({ method: "GET", route: "/users/:id" });
       expect(s.get("http.method")).toBe("GET");
+      // Removing a value is a change, and a context does not change.
       s.del("http.method");
-      expect(s.get("http")).toEqual({ route: "/users/:id" });
+      expect(s.get("http")).toEqual({ method: "GET", route: "/users/:id" });
     });
   });
 
@@ -50,9 +51,10 @@ describe("SpawnTrail core", () => {
     const s = new SpawnTrail();
     s.run({ a: 1 }, () => {
       s.put("b", 2);
-      s.run({ c: 3 }, () => {
-        expect(s.bindings()).toEqual({ a: 1, b: 2, c: 3 });
-        s.put("b", 99); // shadow in child
+      // A child shadows through its SEED, which opens a new record, rather than
+      // by writing over one the parent already wrote.
+      s.run({ c: 3, b: 99 }, () => {
+        expect(s.bindings()).toEqual({ a: 1, b: 99, c: 3 });
         expect(s.get("b")).toBe(99);
       });
       // back in parent: child mutations are gone

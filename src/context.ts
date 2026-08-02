@@ -19,8 +19,10 @@ import {
   delPath,
   clone,
   deepMerge,
+  deepMergeKeeping,
   emptyBindings,
   mergeMissing,
+  refuseImmutable,
 } from "./mdc";
 
 export interface Store {
@@ -130,36 +132,89 @@ export class SpawnTrail {
   }
 
   /**
-   * Add/overwrite a value at a dot-path. Inside a scope it is scope-local;
-   * outside, it sets a process default.
+   * Set a value at a dot-path. Inside a scope it is scope-local; outside, it
+   * sets a process default.
    *
-   * The value is copied on the way in. This is the only place caller data enters
-   * a store that is not already a merge, so it is where the invariant is bought:
-   * without the copy the store aliases the caller's object, and then
-   * `put("user", u)` followed by `put("user.role", "admin")` writes `role` into
-   * the application's own `u`.
+   * **A key that already holds a value keeps it.** A context is the record of
+   * one unit of work, and a record whose fields change underneath it cannot be
+   * read back with any confidence: two lines from the same request would
+   * disagree about who the actor was, and nothing in either line would say which
+   * one to believe. So the first write wins, a second one with a different value
+   * is refused, and the attempt is reported through `setViolationHandler` with
+   * both values, because a silent refusal is its own kind of wrong answer.
+   *
+   * `undefined` is not a value. `put("userId", req.user?.id)` before
+   * authentication has resolved sets nothing, so the real id still lands when it
+   * arrives, which is the whole point of injecting at log time.
+   *
+   * Writing the identical value again is not a change and passes quietly.
+   *
+   * A value that genuinely varies is not identity and does not belong here: put
+   * it on the line (`logger.info({ stage }, "...")`), where a call-site field
+   * already wins over the ambient one. A retry or a phase that really needs its
+   * own context opens a nested scope, which is a new record rather than an
+   * edit to this one.
+   *
+   * The value is copied on the way in, which is what stops `put("user", u)`
+   * followed by `put("user.role", "admin")` from writing `role` into the
+   * application's own `u`.
    */
   put(path: string, value: unknown): this {
-    setPath(this.target(), path, clone(value));
+    if (value === undefined) return this;
+    const target = this.target();
+    const current = getPath(target, path);
+    if (current !== undefined) {
+      if (!Object.is(current, value)) refuseImmutable(path, current, value);
+      return this;
+    }
+    setPath(target, path, clone(value));
     return this;
   }
 
-  /** Read the whole context, or a single dot-path. */
+  /**
+   * Read the whole context, or a single dot-path.
+   *
+   * Both forms return a copy. The dot-path form used to hand back the store's
+   * own node, which made `trail.get("user").role = "admin"` a way to change the
+   * context without going through `put()` at all, so the write-once rule above
+   * would have been false from the first line of code that tried it.
+   */
   get(path?: string): unknown {
-    return path === undefined ? this.bindings() : getPath(this.target(), path);
+    return path === undefined ? this.bindings() : clone(getPath(this.target(), path));
   }
 
-  /** Remove a value at a dot-path. */
+  /**
+   * Remove a value at a dot-path.
+   *
+   * Refused where there is something to remove, for the same reason a second
+   * `put()` is: deleting and setting again would be the write-once rule with a
+   * door in the back of it. Removing a key that was never set is a no-op.
+   */
   del(path: string): this {
+    const current = getPath(this.target(), path);
+    if (current !== undefined) {
+      refuseImmutable(path, current, undefined);
+      return this;
+    }
     delPath(this.target(), path);
     return this;
   }
 
-  /** Clear the current scope's context (or the process defaults outside a scope). */
+  /**
+   * Reset the process defaults. Refused inside a scope.
+   *
+   * Outside a scope this is the one explicit way to start over, which tests and
+   * reconfiguration need. Inside a scope it would empty a record that is being
+   * written, so it is refused; an open scope is not affected by a reset that
+   * happens outside it either, because a scope copies the defaults when it opens.
+   */
   clear(): this {
     const store = this.als.getStore();
-    if (store) store.bindings = emptyBindings();
-    else this.base = emptyBindings();
+    if (store) {
+      refuseImmutable("*", store.bindings, undefined);
+      return this;
+    }
+    this.base = emptyBindings();
     return this;
   }
 
@@ -178,9 +233,14 @@ export class SpawnTrail {
     return id;
   }
 
-  /** Merge process-wide default bindings (present in every scope). */
+  /**
+   * Merge process-wide default bindings (present in every scope).
+   *
+   * Same rule as `put()`: a default that already has a value keeps it. Use
+   * `clear()` outside any scope to start over.
+   */
   setDefaults(bindings: Bindings): this {
-    this.base = deepMerge(this.base, bindings);
+    this.base = deepMergeKeeping(this.base, bindings);
     return this;
   }
 

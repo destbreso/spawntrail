@@ -174,8 +174,8 @@ describe("a path can never reach the prototype chain", () => {
     trail.run({ job: { constructor: "Acme Builders", prototype: "v2" } }, () => {
       expect(trail.get("job.constructor")).toBe("Acme Builders");
       expect(trail.get("job.prototype")).toBe("v2");
-      trail.put("job.constructor", "Beta Builders");
-      expect(trail.get("job.constructor")).toBe("Beta Builders");
+      trail.put("job.builtBy.constructor", "Beta Builders");
+      expect(trail.get("job.builtBy.constructor")).toBe("Beta Builders");
     });
   });
 
@@ -254,14 +254,28 @@ describe("a value that misbehaves does not take the request with it", () => {
     });
   });
 
-  it("preserves a cycle rather than flattening it, and shares one copy for one object", () => {
+  it("preserves a cycle, and keeps two paths to one object independent", () => {
     const copy = clone(circular()) as Record<string, unknown>;
     expect(copy.self).toBe(copy);
 
+    // Two references to one input become two independent nodes. Sharing them
+    // would be cheaper and would mean `put("a.x", 1)` also wrote `b.x`, which is
+    // not something a store's paths may do to each other.
     const shared = { id: 1 };
     const twice = clone({ a: shared, b: shared }) as Record<string, Record<string, unknown>>;
-    expect(twice.a).toBe(twice.b);
+    expect(twice.a).not.toBe(twice.b);
     expect(twice.a).not.toBe(shared);
+    expect(twice.a).toEqual({ id: 1 });
+  });
+
+  it("keeps two context paths seeded from one object independent", () => {
+    const trail = new SpawnTrail();
+    const user = { id: 7, role: "user" };
+    trail.run({ req: { id: "r1", user }, user }, () => {
+      trail.put("user.tier", "gold");
+      expect(trail.get("req.user")).toEqual({ id: 7, role: "user" });
+      expect(trail.get("user")).toEqual({ id: 7, role: "user", tier: "gold" });
+    });
   });
 
   it("survives a real Express request shape through the middleware and a retry scope", () => {
@@ -312,13 +326,32 @@ describe("a value that misbehaves does not take the request with it", () => {
   it("does not destroy an array with an ordinary dotted write", () => {
     const trail = new SpawnTrail();
     trail.run({ items: [{ id: 1 }, { id: 2 }] }, () => {
-      trail.put("items.0.id", 99);
+      trail.put("items.0.label", "first");
       const items = trail.get("items") as Array<Record<string, unknown>>;
       expect(Array.isArray(items)).toBe(true);
       expect(items).toHaveLength(2);
-      expect(items[0]!.id).toBe(99);
+      expect(items[0]).toEqual({ id: 1, label: "first" });
       expect(items[1]!.id).toBe(2);
     });
+  });
+
+  it("keeps the holes in a sparse array instead of materialising them", () => {
+    const sparse: unknown[] = [];
+    sparse[1_000_000] = "only";
+    const trail = new SpawnTrail();
+    trail.run({ sparse }, () => {
+      const copy = trail.get("sparse") as unknown[];
+      expect(copy).toHaveLength(1_000_001);
+      expect(Object.keys(copy)).toHaveLength(1);
+      expect(copy[1_000_000]).toBe("only");
+    });
+  });
+
+  it("does not throw on an array used as a numeric map", () => {
+    const byId: unknown[] = [];
+    byId[200_000_000] = { name: "row" };
+    const trail = new SpawnTrail();
+    expect(() => trail.run({ byId }, () => undefined)).not.toThrow();
   });
 });
 
@@ -420,7 +453,76 @@ describe("what the library hands out is a copy, on every path that hands one out
   });
 });
 
+describe("what the library writes into is never the caller's, records included", () => {
+  /**
+   * The log record belongs to whoever wrote the log call, and so do the objects
+   * hanging off it: winston shallow-copies its metadata, so `info.product` IS
+   * the application's object. Merging context into it stamps one request's
+   * values onto an object the application reuses, and every later line carries
+   * them.
+   */
+  it("does not stamp one request's context onto a reused metadata object", () => {
+    const trail = new SpawnTrail();
+    const format = trail.winston();
+    const product = { sku: "A-1" }; // a module-level constant in the app
+    const lines: Array<Record<string, unknown>> = [];
+
+    for (const tenant of ["acme", "globex", "initech"]) {
+      trail.run({ requestId: `req-${tenant}`, product: { tenant } }, () => {
+        lines.push(format.transform({ message: "priced", product }));
+      });
+    }
+
+    expect(product).toEqual({ sku: "A-1" });
+    expect(lines.map((l) => (l.product as Record<string, unknown>).tenant)).toEqual([
+      "acme",
+      "globex",
+      "initech",
+    ]);
+  });
+
+  it("still merges context under the record's own fields", () => {
+    const trail = new SpawnTrail();
+    trail.run({ user: { id: 1, tenant: "acme" } }, () => {
+      const record = trail.winston().transform({ message: "m", user: { id: 999 } });
+      expect(record.user).toEqual({ id: 999, tenant: "acme" });
+    });
+  });
+});
+
+describe("the bound is on the work, which is the only thing that costs time", () => {
+  it("stops on a large array instead of copying every element", () => {
+    const trail = new SpawnTrail();
+    const rows = Array.from({ length: 2_000_000 }, (_, i) => i);
+    let refusals = 0;
+    setViolationHandler(() => refusals++);
+    const started = performance.now();
+    trail.run({ rows }, () => undefined);
+    expect(performance.now() - started).toBeLessThan(300);
+    expect(refusals).toBeGreaterThan(0);
+  });
+
+  it("bounds a dotted key built from data, which no copy bound would see", () => {
+    const trail = new SpawnTrail();
+    const hostile = Array(200_000).fill("k").join(".");
+    const started = performance.now();
+    trail.run(() => {
+      trail.put(hostile, 1);
+      expect(trail.get("k")).toBeUndefined();
+    });
+    expect(performance.now() - started).toBeLessThan(300);
+  });
+});
+
 describe("the refusal is reachable, observable, and not a log flood", () => {
+  it("does not let a handler that throws escape the log call", () => {
+    setViolationHandler(() => {
+      throw new Error("a handler that fails a test");
+    });
+    const trail = new SpawnTrail();
+    expect(() => trail.run(() => trail.put("__proto__.x", 1))).not.toThrow();
+  });
+
   /**
    * The hook was implemented, tested, and shipped dead: it was never re-exported
    * from the entry point, so the bundler proved it was always undefined and
@@ -444,6 +546,7 @@ describe("the refusal is reachable, observable, and not a log flood", () => {
     });
     expect(seen).toHaveLength(5);
     expect(seen.every((reason) => reason === "forbidden-key")).toBe(true);
+    expect(({} as Record<string, unknown>).x).toBeUndefined();
   });
 
   it("warns at most once per process when nobody is listening", () => {

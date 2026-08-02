@@ -10,21 +10,26 @@
  * and it must not crash it. Both rest on one invariant, stated once and enforced
  * in one place:
  *
- *   EVERY object and array reachable from a context was created here.
- *   Nothing in a context is the same object as anything a caller holds.
+ *   EVERY plain object and array reachable from a context was created here.
+ *   No CONTAINER in a context is the same object as one a caller holds.
  *
- * That single sentence is what makes scopes isolated (no two stores can share a
- * node), what makes an emitted record a real snapshot (a later mutation has
- * nothing to reach), and what makes a dot-path walk safe (it can only ever step
- * into objects this file built, so it can never arrive at a prototype). A
- * denylist of dangerous key names is the weaker version of the same idea: it
- * enumerates the ways in, and the list is only ever as complete as the last
- * person to think about it.
+ * That sentence is what makes scopes isolated (no two stores can share a node),
+ * what makes an emitted record a real snapshot, and what makes a dot-path walk
+ * safe (it can only ever step into objects this file built, so it can never
+ * arrive at a prototype). A denylist of dangerous key names is the weaker
+ * version of the same idea: it enumerates the ways in, and the list is only ever
+ * as complete as the last person to think about it.
  *
- * Values that are NOT plain objects or arrays (an Error, a Date, a class
- * instance, a socket) are kept by reference, because dropping them would make
- * the library useless for the thing people actually log. They are also never
- * traversed, so they cannot be a way back out.
+ * The word CONTAINER is doing real work there, and the carve-out has to be said
+ * out loud rather than left in the small print. Values that are not plain
+ * objects or arrays (an Error, a Date, a Map, a class instance, a socket) are
+ * kept BY REFERENCE, because copying them would either fail or hand back
+ * something that is not the thing that was logged. So `put("err", err)` does
+ * store the caller's Error, and mutating `err.details` afterwards is visible
+ * through the context. What the guarantee buys is that this is the only way it
+ * can happen, that it cannot happen accidentally through a plain object, and
+ * that nothing reachable this way is ever WALKED INTO, so it is not a route back
+ * out of the store.
  */
 
 /** A context object: arbitrary structured data attached to logs. */
@@ -66,15 +71,21 @@ export function isForbiddenKey(key: string): boolean {
 export const CLONE_DEPTH_LIMIT = 32;
 
 /**
- * How many objects one copy may create before it substitutes a marker.
+ * How many properties and array elements one copy may visit before it
+ * substitutes a marker.
  *
- * Depth was never the thing worth bounding. What starves an event loop is total
- * work, and total work is a function of the whole shape: an object graph that is
- * only nine nodes wide can still cost more than a machine has if every node is
- * reachable by many routes, or if reading a property produces a fresh object
- * each time and defeats the memo. This bounds the work directly.
+ * Depth was never the thing worth bounding, and neither is the number of
+ * objects. What starves an event loop is total work: a two-object context whose
+ * second object is a three-million-element array is two objects and a third of
+ * a second, and it is paid again on every nested scope and every log record.
+ * Counting each property and each element is the only count that tracks the
+ * time actually spent.
+ *
+ * A context is for the handful of values that identify a unit of work. This
+ * bound is what makes "a value nobody meant to log cannot take down the process"
+ * true rather than aspirational, and reaching it is reported, not silent.
  */
-export const CLONE_NODE_LIMIT = 10_000;
+export const CLONE_WORK_LIMIT = 10_000;
 
 /** Substituted for a value the copy refused to descend into. */
 export const TRUNCATED = "[spawntrail: truncated]";
@@ -82,7 +93,13 @@ export const TRUNCATED = "[spawntrail: truncated]";
 /** Substituted for a value that could not be read without throwing. */
 export const UNREADABLE = "[spawntrail: unreadable]";
 
-export type ViolationReason = "forbidden-key" | "truncated" | "unreadable" | "invalid-path";
+export type ViolationReason =
+  | "forbidden-key"
+  | "truncated"
+  | "unreadable"
+  | "invalid-path"
+  /** A key that already held a value was written again with a different one. */
+  | "immutable";
 
 /**
  * Notified when an operation is refused or a value is substituted.
@@ -92,7 +109,14 @@ export type ViolationReason = "forbidden-key" | "truncated" | "unreadable" | "in
  * once, so a loop over attacker-controlled keys cannot turn a refusal into a log
  * flood.
  */
-export type ViolationHandler = (event: { reason: ViolationReason; key?: string; path?: string }) => void;
+export type ViolationHandler = (event: {
+  reason: ViolationReason;
+  key?: string;
+  path?: string;
+  /** For `"immutable"`: the value that stays, and the one that was refused. */
+  current?: unknown;
+  rejected?: unknown;
+}) => void;
 
 let onViolation: ViolationHandler | undefined;
 let warned = false;
@@ -107,18 +131,47 @@ export function resetViolationWarning(): void {
   warned = false;
 }
 
-function refuse(reason: ViolationReason, key?: string, path?: string): void {
+function refuse(
+  reason: ViolationReason,
+  key?: string,
+  path?: string,
+  detail?: { current: unknown; rejected: unknown },
+): void {
   if (onViolation) {
-    onViolation({ reason, key, path });
+    try {
+      onViolation({ reason, key, path, current: detail?.current, rejected: detail?.rejected });
+    } catch {
+      // A handler that throws would undo the very property the refusal exists to
+      // provide, and the README suggests exactly the shape ("fail a test on
+      // them") that throws.
+    }
     return;
   }
   if (warned || process.env.NODE_ENV === "production") return;
   warned = true;
+  // Clipped, because the thing being reported is sometimes the reason it is too
+  // long: an "invalid-path" notice for a key built from data is a notice whose
+  // own payload can be megabytes.
+  const clip = (text: string): string => (text.length > 80 ? `${text.slice(0, 80)}... (${text.length} chars)` : text);
   // eslint-disable-next-line no-console
   console.warn(
-    `spawntrail: ${reason}${key ? ` (${JSON.stringify(key)})` : ""}${path ? ` in path ${JSON.stringify(path)}` : ""}. ` +
+    `spawntrail: ${reason}${key ? ` (${JSON.stringify(clip(key))})` : ""}` +
+      `${path ? ` in path ${JSON.stringify(clip(path))}` : ""}. ` +
       "Pass a handler to setViolationHandler() to observe these; further notices are silent.",
   );
+}
+
+/**
+ * Report a refused change to a key that already holds a value.
+ *
+ * A context is meant to be readable as a record of one unit of work, so a value
+ * in it does not change once it is there. Refusing quietly would be its own kind
+ * of lie: the code believes it wrote the real actor and the line says otherwise,
+ * with nothing anywhere to say so. The attempt is therefore always reported,
+ * with both values, even though it is never fatal.
+ */
+export function refuseImmutable(path: string, current: unknown, rejected: unknown): void {
+  refuse("immutable", undefined, path, { current, rejected });
 }
 
 /**
@@ -220,10 +273,10 @@ export function getPath(obj: Bindings, path: string): unknown {
 
   let cur: unknown = obj;
   for (const key of keys) {
-    if (isForbiddenKey(key)) {
-      refuse("forbidden-key", key, path);
-      return undefined;
-    }
+    // Not reported: a read of a key that can never be stored is simply a miss,
+    // and reporting it here would fire a second event for every refused write,
+    // since a write checks what is there first.
+    if (isForbiddenKey(key)) return undefined;
     if (!canDescend(cur)) return undefined;
     if (!hasOwn(cur, key)) return undefined;
     cur = cur[key];
@@ -245,6 +298,14 @@ export function getPath(obj: Bindings, path: string): unknown {
 export function setPath(obj: Bindings, path: string, value: unknown): void {
   const keys = toKeys(path);
   if (keys === undefined) return;
+  if (keys.length > CLONE_DEPTH_LIMIT) {
+    // The threat model for this file is a generic mapper writing keys it did not
+    // choose. Without a bound, one such key of a few million segments builds a
+    // store that deep and takes the process down with it, which the copy bound
+    // never sees because nothing was copied.
+    refuse("invalid-path", undefined, path);
+    return;
+  }
   const last = keys.pop();
   if (last === undefined) return;
 
@@ -311,29 +372,48 @@ export function delPath(obj: Bindings, path: string): void {
 }
 
 interface CopyBudget {
-  nodes: number;
+  /**
+   * How many properties and array elements are left to visit.
+   *
+   * The unit is WORK, not containers. Counting containers looks equivalent and
+   * is not: a context of two objects, one of which holds a three-million-element
+   * array, is two containers and several hundred milliseconds of a blocked event
+   * loop. A budget that never fires on that input is not a budget.
+   */
+  work: number;
+}
+
+function budgetSpent(budget: CopyBudget): boolean {
+  if (budget.work > 0) return false;
+  refuse("truncated");
+  return true;
 }
 
 /**
  * Structural copy: plain objects and arrays are rebuilt here, everything else is
  * kept by reference.
  *
- * Cycle-safe and sharing-safe through one memo, which is what makes the cost
- * linear in the number of distinct nodes rather than exponential in the number
- * of routes to them. The values people reach for while debugging are exactly the
- * ones with both properties: an axios error, an Express `req`, a mongoose
- * document and a pooled client all contain themselves somewhere, and the same
- * sub-object is usually reachable several ways.
+ * Cycles are resolved against the copy being built, so a self-referential value
+ * keeps its shape. Two references to the same object become two independent
+ * copies, which is the opposite of what a memo would do and is deliberate: a
+ * store's paths have to be independent, or `put("user.role", x)` also rewrites
+ * whatever else happened to be seeded from the same object. What keeps that
+ * honesty affordable is the budget, not sharing.
  */
 export function clone<T>(v: T): T {
-  return cloneInner(v, new WeakMap<object, unknown>(), 0, { nodes: CLONE_NODE_LIMIT }) as T;
+  return cloneInner(v, new Map<object, unknown>(), 0, { work: CLONE_WORK_LIMIT }) as T;
 }
 
-function cloneInner(v: unknown, seen: WeakMap<object, unknown>, depth: number, budget: CopyBudget): unknown {
+/**
+ * @param open the containers on the current descent, mapped to the copy being
+ * built for each. Present so a cycle resolves; removed on the way back up so a
+ * sibling reference is copied again rather than shared.
+ */
+function cloneInner(v: unknown, open: Map<object, unknown>, depth: number, budget: CopyBudget): unknown {
   if (v === null || typeof v !== "object") return v;
 
-  const already = seen.get(v);
-  if (already !== undefined) return already;
+  const inProgress = open.get(v);
+  if (inProgress !== undefined) return inProgress;
 
   let array: boolean;
   try {
@@ -348,115 +428,194 @@ function cloneInner(v: unknown, seen: WeakMap<object, unknown>, depth: number, b
   // is, and never walked into, so it is not a route back out of the store.
   if (!array && !isPlainObject(v)) return v;
 
-  if (depth >= CLONE_DEPTH_LIMIT || budget.nodes <= 0) {
+  if (depth >= CLONE_DEPTH_LIMIT) {
     refuse("truncated");
     return TRUNCATED;
   }
-  budget.nodes -= 1;
+  if (budgetSpent(budget)) return TRUNCATED;
 
   if (array) {
     const out: unknown[] = own([]);
-    seen.set(v, out);
-    const source = v as unknown[];
-    let length = 0;
+    open.set(v, out);
     try {
-      length = source.length;
-    } catch {
-      refuse("unreadable");
+      copyArray(v as unknown[], out, open, depth, budget);
+    } finally {
+      open.delete(v);
     }
-    // By index rather than by key, so a sparse array keeps its length and its
-    // holes stay where they were.
-    for (let i = 0; i < length; i++) {
-      out[i] = hasOwn(source, String(i))
-        ? cloneInner(readOwn(source, String(i)), seen, depth + 1, budget)
-        : undefined;
-    }
-    out.length = length;
     return out;
   }
 
   const out: Bindings = own({});
-  seen.set(v, out);
-  for (const key of ownKeys(v)) {
-    if (isForbiddenKey(key)) {
-      refuse("forbidden-key", key);
-      continue;
+  open.set(v, out);
+  try {
+    for (const key of ownKeys(v)) {
+      if (isForbiddenKey(key)) {
+        refuse("forbidden-key", key);
+        continue;
+      }
+      if (budgetSpent(budget)) {
+        out[TRUNCATED] = TRUNCATED;
+        break;
+      }
+      budget.work -= 1;
+      out[key] = cloneInner(readOwn(v, key), open, depth + 1, budget);
     }
-    out[key] = cloneInner(readOwn(v, key), seen, depth + 1, budget);
+  } finally {
+    open.delete(v);
   }
   return out;
 }
 
+/**
+ * Copy an array by its own index keys, so a hole stays a hole.
+ *
+ * Walking 0..length and writing `undefined` for the gaps keeps the length and
+ * destroys the shape: assigning `undefined` creates an own property, so a
+ * one-element array indexed at five million comes out the other side with five
+ * million own properties and the heap to match. `byId[rowId] = row` is all it
+ * takes to build one.
+ */
+function copyArray(
+  source: unknown[],
+  out: unknown[],
+  open: Map<object, unknown>,
+  depth: number,
+  budget: CopyBudget,
+): void {
+  let length = 0;
+  try {
+    length = source.length;
+  } catch {
+    refuse("unreadable");
+    return;
+  }
+
+  for (const key of ownKeys(source)) {
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < 0) continue;
+    if (budgetSpent(budget)) {
+      // Stop where the budget ran out rather than marking every remaining slot:
+      // filling a two-hundred-thousand-element array with markers is the cost
+      // the budget exists to avoid, paid anyway.
+      out.push(TRUNCATED);
+      return;
+    }
+    budget.work -= 1;
+    out[index] = cloneInner(readOwn(source, key), open, depth + 1, budget);
+  }
+
+  try {
+    if (out.length < length) out.length = length;
+  } catch {
+    refuse("truncated");
+  }
+}
+
 interface MergeContext {
-  seen: WeakMap<object, unknown>;
-  pairs: WeakMap<object, WeakMap<object, Bindings>>;
+  /** Pairs on the current descent, so a cycle through both sides terminates. */
+  open: Map<object, Map<object, Bindings>>;
+  /** When set, a key that already holds a value keeps it. */
+  immutable: boolean;
+  openValues: Map<object, unknown>;
   budget: CopyBudget;
+}
+
+function openPair(ctx: MergeContext, base: object, patch: object): Bindings | undefined {
+  return ctx.open.get(base)?.get(patch);
+}
+
+function markPair(ctx: MergeContext, base: object, patch: object, out: Bindings): void {
+  let inner = ctx.open.get(base);
+  if (inner === undefined) {
+    inner = new Map<object, Bindings>();
+    ctx.open.set(base, inner);
+  }
+  inner.set(patch, out);
+}
+
+function unmarkPair(ctx: MergeContext, base: object, patch: object): void {
+  ctx.open.get(base)?.delete(patch);
 }
 
 /**
  * Merge `patch` over `base`, returning a NEW object. Neither input is mutated,
  * and no part of either ends up inside the result by reference.
- *
- * Descending two objects at once needs its own memo, and for two reasons that
- * look alike and are not. A cycle needs the result registered BEFORE its
- * children are filled in, so a loop resolves to the object being built. Shared
- * references need the same table so a node reachable by many routes is merged
- * once: guarding cycles alone with an on-the-path set terminates, and then costs
- * width-to-the-power-of-depth, which on a nine-node graph is nearly a minute of
- * a starved event loop.
  */
 export function deepMerge(base: Bindings, patch: Bindings): Bindings {
-  return deepMergeInner(base, patch, {
-    seen: new WeakMap<object, unknown>(),
-    pairs: new WeakMap<object, WeakMap<object, Bindings>>(),
-    budget: { nodes: CLONE_NODE_LIMIT },
-  }, 0);
+  return deepMergeInner(
+    base,
+    patch,
+    { open: new Map(), openValues: new Map(), budget: { work: CLONE_WORK_LIMIT }, immutable: false },
+    0,
+  );
+}
+
+/**
+ * Merge `patch` over `base`, keeping any value `base` already has.
+ *
+ * The same merge with the write-once rule applied at each leaf: a key that holds
+ * a value keeps it, and the refusal is reported with both values. Writing the
+ * identical value again is not a change and passes silently.
+ */
+export function deepMergeKeeping(base: Bindings, patch: Bindings): Bindings {
+  return deepMergeInner(
+    base,
+    patch,
+    { open: new Map(), openValues: new Map(), budget: { work: CLONE_WORK_LIMIT }, immutable: true },
+    0,
+  );
 }
 
 function deepMergeInner(base: Bindings, patch: Bindings, ctx: MergeContext, depth: number): Bindings {
-  let pairsForBase = ctx.pairs.get(base);
-  if (pairsForBase === undefined) {
-    pairsForBase = new WeakMap<object, Bindings>();
-    ctx.pairs.set(base, pairsForBase);
-  }
-  const already = pairsForBase.get(patch);
-  if (already !== undefined) return already;
+  const inProgress = openPair(ctx, base, patch);
+  if (inProgress !== undefined) return inProgress;
 
   const out: Bindings = emptyBindings();
-  pairsForBase.set(patch, out);
-
-  if (depth >= CLONE_DEPTH_LIMIT || ctx.budget.nodes <= 0) {
+  if (depth >= CLONE_DEPTH_LIMIT || budgetSpent(ctx.budget)) {
     refuse("truncated");
     return out;
   }
-  ctx.budget.nodes -= 1;
+  markPair(ctx, base, patch, out);
 
-  // Read `base` once. It is normally a store, but `deepMerge` is exported, and a
-  // property read is allowed to be a getter with opinions.
-  const fromBase = new Map<string, unknown>();
-  for (const key of ownKeys(base)) {
-    if (isForbiddenKey(key)) {
-      refuse("forbidden-key", key);
-      continue;
+  try {
+    // Read `base` once. It is normally a store, but `deepMerge` is exported, and
+    // a property read is allowed to be a getter with opinions.
+    const fromBase = new Map<string, unknown>();
+    for (const key of ownKeys(base)) {
+      if (isForbiddenKey(key)) {
+        refuse("forbidden-key", key);
+        continue;
+      }
+      fromBase.set(key, readOwn(base, key));
     }
-    fromBase.set(key, readOwn(base, key));
-  }
 
-  for (const [key, val] of fromBase) {
-    out[key] = cloneInner(val, ctx.seen, depth + 1, ctx.budget);
-  }
-
-  for (const key of ownKeys(patch)) {
-    if (isForbiddenKey(key)) {
-      refuse("forbidden-key", key);
-      continue;
+    for (const [key, val] of fromBase) {
+      if (budgetSpent(ctx.budget)) break;
+      ctx.budget.work -= 1;
+      out[key] = cloneInner(val, ctx.openValues, depth + 1, ctx.budget);
     }
-    const val = readOwn(patch, key);
-    const cur = fromBase.get(key);
-    out[key] =
-      isPlainObject(cur) && isPlainObject(val)
-        ? deepMergeInner(cur, val, ctx, depth + 1)
-        : cloneInner(val, ctx.seen, depth + 1, ctx.budget);
+
+    for (const key of ownKeys(patch)) {
+      if (isForbiddenKey(key)) {
+        refuse("forbidden-key", key);
+        continue;
+      }
+      if (budgetSpent(ctx.budget)) break;
+      ctx.budget.work -= 1;
+      const val = readOwn(patch, key);
+      const cur = fromBase.get(key);
+      if (isPlainObject(cur) && isPlainObject(val)) {
+        out[key] = deepMergeInner(cur, val, ctx, depth + 1);
+        continue;
+      }
+      if (ctx.immutable && cur !== undefined && !Object.is(cur, val)) {
+        refuseImmutable(key, cur, val);
+        continue;
+      }
+      out[key] = cloneInner(val, ctx.openValues, depth + 1, ctx.budget);
+    }
+  } finally {
+    unmarkPair(ctx, base, patch);
   }
   return out;
 }
@@ -466,18 +625,19 @@ function deepMergeInner(base: Bindings, patch: Bindings, ctx: MergeContext, dept
  * have a value. Used to inject ambient context into a log record without
  * clobbering a field the call site set explicitly (the call site is more specific).
  *
- * `target` is the logger's record, not ours, so this is the one place that writes
- * into an object it did not build. Everything it writes is a fresh copy.
+ * `target` is the logger's record, which means the objects hanging off it belong
+ * to whoever wrote the log call. winston shallow-copies its metadata, so
+ * `logger.info("m", { product })` puts the application's own `product` on the
+ * record. Descending into that and adding context keys to it writes into the
+ * application's data: if the object is reused, the first request's context is
+ * stamped on it and every later line carries it. So a node this library did not
+ * build is replaced by a copy before anything is merged into it.
  */
 export function mergeMissing(target: Record<string, unknown>, patch: Bindings): void {
   mergeMissingInner(
     target,
     patch,
-    {
-      seen: new WeakMap<object, unknown>(),
-      pairs: new WeakMap<object, WeakMap<object, Bindings>>(),
-      budget: { nodes: CLONE_NODE_LIMIT },
-    },
+    { open: new Map(), openValues: new Map(), budget: { work: CLONE_WORK_LIMIT }, immutable: false },
     0,
   );
 }
@@ -488,34 +648,35 @@ function mergeMissingInner(
   ctx: MergeContext,
   depth: number,
 ): void {
-  let pairsForTarget = ctx.pairs.get(target);
-  if (pairsForTarget === undefined) {
-    pairsForTarget = new WeakMap<object, Bindings>();
-    ctx.pairs.set(target, pairsForTarget);
-  }
-  if (pairsForTarget.get(patch) !== undefined) return;
-  pairsForTarget.set(patch, target as Bindings);
+  if (openPair(ctx, target, patch) !== undefined) return;
+  if (depth >= CLONE_DEPTH_LIMIT || budgetSpent(ctx.budget)) return;
+  markPair(ctx, target, patch, target as Bindings);
 
-  if (depth >= CLONE_DEPTH_LIMIT || ctx.budget.nodes <= 0) {
-    refuse("truncated");
-    return;
-  }
-  ctx.budget.nodes -= 1;
+  try {
+    for (const key of ownKeys(patch)) {
+      if (isForbiddenKey(key)) {
+        refuse("forbidden-key", key);
+        continue;
+      }
+      if (budgetSpent(ctx.budget)) return;
+      ctx.budget.work -= 1;
 
-  for (const key of ownKeys(patch)) {
-    if (isForbiddenKey(key)) {
-      refuse("forbidden-key", key);
-      continue;
+      const val = readOwn(patch, key);
+      if (!hasOwn(target, key)) {
+        assign(target, key, cloneInner(val, ctx.openValues, depth + 1, ctx.budget));
+        continue;
+      }
+
+      const cur = readOwn(target, key);
+      if (!isPlainObject(cur) || !isPlainObject(val)) continue;
+
+      // The call site's own object. Merge into a copy of it, never into it.
+      const into = OWNED.has(cur) ? cur : (cloneInner(cur, ctx.openValues, depth + 1, ctx.budget) as Bindings);
+      if (into !== cur && !assign(target, key, into)) continue;
+      if (!isPlainObject(into)) continue;
+      mergeMissingInner(into, val, ctx, depth + 1);
     }
-    const val = readOwn(patch, key);
-    if (!hasOwn(target, key)) {
-      assign(target, key, cloneInner(val, ctx.seen, depth + 1, ctx.budget));
-      continue;
-    }
-    const cur = target[key];
-    if (isPlainObject(cur) && isPlainObject(val)) {
-      mergeMissingInner(cur, val, ctx, depth + 1);
-    }
-    // else: target already holds a value at `key`, so keep it (call-site wins)
+  } finally {
+    unmarkPair(ctx, target, patch);
   }
 }

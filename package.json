@@ -1,6 +1,6 @@
 {
   "name": "spawntrail",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Contextual logging for Node via AsyncLocalStorage and Mapped Diagnostic Context (MDC). Attach request-scoped context to every log line, with any logger (winston, pino) and any framework (express, fastify, koa). Zero dependencies, TypeScript-first.",
   "author": {
     "name": "David Estevez",
@@ -13,9 +13,14 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     }
   },
   "files": [

@@ -19,17 +19,18 @@ describe("concurrency isolation", () => {
         s.run({ taskId: i }, async () => {
           s.put("step", "start");
           await delay(i % 7); // stagger so scopes interleave on the event loop
-          s.put("step", "middle");
+          s.put("checkpoint", `task-${i}`);
           await delay((N - i) % 5);
           // each task must still see ONLY its own context
-          return { taskId: s.get("taskId"), step: s.get("step") };
+          return { taskId: s.get("taskId"), step: s.get("step"), checkpoint: s.get("checkpoint") };
         }),
       ),
     );
 
     results.forEach((r, i) => {
       expect(r.taskId).toBe(i);
-      expect(r.step).toBe("middle");
+      expect(r.step).toBe("start");
+      expect(r.checkpoint).toBe(`task-${i}`);
     });
 
     // nothing leaks after everything settles

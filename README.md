@@ -124,39 +124,68 @@ The shape to look for is always the same: **one unit of work, many async frames,
 
 ---
 
-## What a context holds, and the one rule about it
+## What a context is, and the two rules about it
 
-**Nothing in a context is an object you also hold.** Values are copied on the way in, at every level, on every path: `run()`, `put()`, `setDefaults()`, and everything the library hands back out. That single rule is what makes the rest true. Two scopes cannot share a node, so a write in one request can never appear in another. A log record is a real snapshot, so mutating a value afterwards cannot rewrite a line that was already emitted. And a dot-path walk only ever steps into objects this library built, so `put()` cannot arrive somewhere that is not your context, whatever the path says.
+A context is the ambient record of one unit of work: the handful of values that say WHICH request, job or tick a log line belongs to. Everything else about the design follows from taking that literally.
 
-**Values that are not plain objects or arrays are kept as they are.** An `Error`, a `Date`, a class instance, a socket: copying those would either fail or produce something that is not the thing you logged, so they are stored by reference and never walked into. A circular value is fine, and so is the same object appearing in twenty places: both are handled once, not once per route to them.
+### A value that is set, stays
 
-**`__proto__` is the one key name that is refused,** as a path segment and as a key in any value, because assigning it reassigns a prototype instead of storing data and `JSON.parse` produces it as an ordinary own key. A refusal is silent by default; pass a function to `setViolationHandler()` to count them, log them, or fail a test on them. Every other key name, `constructor` and `prototype` included, is ordinary data.
+**A key that already holds a value keeps it.** The first write wins, a later write with a different value is refused, and the attempt is reported. This is what makes a context worth reading back: without it, two lines from the same request can disagree about who the actor was, and nothing in either line says which one to believe.
 
-**Copying is bounded.** A value is copied to a depth of `CLONE_DEPTH_LIMIT` (32) and a total of `CLONE_NODE_LIMIT` (10,000) objects per operation, after which the rest is replaced by the string `"[spawntrail: truncated]"` and the handler is notified. A property that throws when read becomes `"[spawntrail: unreadable]"` rather than an exception out of your log call. Both bounds are far above any context worth keeping, and they exist so that a value nobody meant to log cannot take down the process.
+```ts
+trail.put("actor", "alice");
+trail.put("actor", "bob");     // refused, reported
+trail.get("actor");            // "alice", on this line and on every other one
+```
+
+Three things that rule deliberately does not do:
+
+- **`undefined` is not a value.** `put("userId", req.user?.id)` before authentication resolves sets nothing, so the real id still lands when it arrives. That is the whole point of injecting at log time, and the rule does not get to break it.
+- **A nested scope is a new record, not an edit to this one.** `run({ attempt: 2 }, fn)` seeds a different value for a key the parent holds, the parent is untouched, and the child is free to say something different. This is how a retry or a phase gets its own context.
+- **Writing the identical value again is not a change** and passes quietly, which is why `ensureId()` stays idempotent.
+
+A value that genuinely varies line to line is not identity and does not belong here. Put it on the line, `logger.info({ stage }, "charging")`, where a call-site field already wins over the ambient one. `del()` and `clear()` inside a scope are refused for the same reason a second `put()` is: deleting and setting again would be this rule with a door in the back of it. Outside any scope, `clear()` is the one explicit reset, for tests and for reconfiguration.
+
+Observe refusals with `setViolationHandler((e) => ...)`, which reports `reason: "immutable"` along with the value that stayed and the one that was turned away. A refusal is never silent to a listener, and it is never fatal.
+
+### No container in a context is one you also hold
+
+Values are copied on the way in and on the way out, at every level, on every path: `run()`, `put()`, `setDefaults()`, `bindings()`, `get()`, the winston format, the pino mixin and `bind()`. That rule is what makes the rest true. Two scopes cannot share a node, so a write in one request can never appear in another. A dot-path walk only ever steps into objects this library built, so `put()` cannot arrive somewhere that is not your context, whatever the path says. And two paths seeded from the same object stay independent, so `put("user.tier", x)` does not also write `req.user.tier`.
+
+**The exception, stated plainly rather than in the small print: values that are not plain objects or arrays are kept BY REFERENCE.** An `Error`, a `Date`, a `Map`, a class instance, a socket. Copying those would either fail or hand back something that is not the thing you logged. So `put("err", err)` does store your `Error`, and mutating `err.details` afterwards is visible through the context. What the rule buys is that this is the only way it can happen, that it cannot happen by accident through a plain object, and that nothing reached this way is ever walked into.
+
+A circular value is fine, and so is an object graph a caller reaches many ways.
+
+### `__proto__` is the one reserved key name
+
+Refused as a path segment and as a key in any value, because assigning it reassigns a prototype instead of storing data, and `JSON.parse` produces it as an ordinary own key. Every other name, `constructor` and `prototype` included, is ordinary data.
+
+### Copying is bounded by work, not by hope
+
+A copy visits at most `CLONE_WORK_LIMIT` (10,000) properties and array elements and descends at most `CLONE_DEPTH_LIMIT` (32) levels, after which the rest becomes `"[spawntrail: truncated]"` and the handler is notified. A dotted path longer than the depth limit is refused outright. A property that throws when read becomes `"[spawntrail: unreadable]"` rather than an exception out of your log call. Counting work rather than objects is the difference between a bound and a slogan: a two-object context whose second object is a three-million-element array is two objects and a third of a second, paid again on every scope and every record.
 
 ---
 
 ## What it costs
 
-Measured on Node 22, one machine, against a context of four identifiers and against a request-shaped one (`{ req: { id, headers, user: { id, org } } }`).
+Node 22, one machine, one run, against two contexts: four flat identifiers, and a request-shaped one (`{ req: { id, headers, user: { id, org } } }`). The second column is the one to plan around if you keep nested objects in context.
 
-| | |
-|---|---|
-| `run()`, four flat keys | ~240 ns |
-| `run()`, request-shaped | ~1.0 µs |
-| `get("requestId")` | ~30 ns |
-| `put("a.b", 1)` | ~67 ns |
-| winston format, per record | ~310 ns |
-| pino mixin, per record | ~390 ns |
-| `bindings()` | ~360 ns |
+| | flat | request-shaped |
+|---|---|---|
+| `run()`, scope entry | ~270 ns | ~1.1 µs |
+| `get("requestId")` | ~44 ns | ~41 ns |
+| `put()`, new key | ~450 ns | ~450 ns |
+| winston format, per record | ~160 ns | ~940 ns |
+| pino mixin, per record | ~230 ns | ~1.1 µs |
+| `bindings()` | ~250 ns | ~1.1 µs |
 
-**Opening a scope copies the context.** `run()` deep-merges its seed over the parent bindings and stores the result, which is what makes a child's writes invisible to its parent. The cost tracks the size of the context you keep, so a context of a few identifiers is nothing, and a context holding a large object is copied on every nested scope. This is the one number worth watching, because it is paid once per request plus once per nested segment.
+**Opening a scope copies the context.** `run()` deep-merges its seed over the parent bindings and stores the result, which is what makes a child's writes invisible to its parent. The cost tracks the size of the context you keep, so a context of a few identifiers is nothing and a context holding a request object is not. This is the number worth watching, because it is paid once per request plus once per nested segment.
 
-**Injection is a merge per log record.** The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Both are well under the cost the logger itself pays to serialize the line.
+**Injection is a copy per log record**, on both integrations. The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy rather than the store, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Roughly a microsecond per line on a nested context, against the two to three a logger already spends serializing it.
 
 **`bind()` is the expensive path, on purpose.** The proxy calls the wrapped logger's `child()` on every property access, so `log.info(...)` in a loop allocates a child per call, and the real cost depends on how heavy that logger's `child()` is. Prefer `winston()` or `pino()` where they exist; `bind()` buys universality with allocations.
 
-Three behaviors are worth knowing before they surprise you. `put()` called outside any scope writes to the same process-wide bindings `setDefaults()` fills, so the value is visible in every scope opened afterwards; that is intentional for configuration like a service name, and easy to trigger by accident from a call site you thought was inside a request. `clear()` inside a scope empties everything visible there, process defaults included, until that scope ends. And `bindings()` is a snapshot, not a live handle: something that grabs it at scope start and reads it later sees the context as it was, not as it is.
+Two behaviors are worth knowing before they surprise you. `put()` called outside any scope writes to the same process-wide bindings `setDefaults()` fills, so the value is visible in every scope opened afterwards; that is intentional for configuration like a service name, and easy to trigger by accident from a call site you thought was inside a request. And `bindings()` is a snapshot, not a live handle: something that grabs it at scope start and reads it later sees the context as it was.
 
 ---
 
@@ -196,11 +225,11 @@ const scope = new SpawnTrail({ idKey?, idFactory?, defaults? });
 
 // context
 scope.run(bindings, fn)   // open a scope (seeded, merged over parent/defaults); returns fn()
-scope.put(path, value)    // set a dot-path ("user.id"); scope-local inside run(), process-default outside
+scope.put(path, value)    // set a dot-path ("user.id"); a key that has a value keeps it
 scope.get(path?)          // read the whole context, or one dot-path
-scope.del(path)           // remove a dot-path
-scope.clear()             // empty the current scope
-scope.bindings()          // the full merged context object
+scope.del(path)           // remove a dot-path (refused where there is a value to remove)
+scope.clear()             // reset the process defaults (refused inside a scope)
+scope.bindings()          // a copy of the full merged context
 scope.id() / ensureId(x)  // read / seed the correlation id
 scope.setDefaults(obj)    // process-wide bindings present in every scope
 

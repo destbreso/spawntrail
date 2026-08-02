@@ -68,7 +68,11 @@ export class SpawnTrail {
   constructor(options: SpawnTrailOptions = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
-    this.base = { ...(options.defaults ?? {}) };
+    // Not a spread: object spread copies `__proto__` from a JSON-parsed object
+    // as an OWN property, which would leave the store carrying the one key that
+    // is never supposed to be there. deepMerge applies the same filter every
+    // other entry point applies.
+    this.base = deepMerge({}, options.defaults ?? {});
   }
 
   /** Open a context scope and run `fn` inside it. */

@@ -9,6 +9,34 @@
 /** A context object: arbitrary structured data attached to logs. */
 export type Bindings = Record<string, unknown>;
 
+/**
+ * The one key name that may never be written, as a path segment or as a key in
+ * any value.
+ *
+ * `__proto__` is not an ordinary property: assigning it reassigns the target's
+ * prototype instead of storing a value. Two consequences, both reachable from a
+ * dot-path built out of data, which is the ordinary shape of a middleware
+ * copying request fields into context:
+ *
+ *   put("__proto__.isAdmin", true)   pollutes Object.prototype process-wide
+ *   run(JSON.parse(payload), fn)     with a `__proto__` key silently replaces
+ *                                    the store's prototype, after which every
+ *                                    read returns nothing for the rest of the
+ *                                    scope, with no error
+ *
+ * `JSON.parse` produces `__proto__` as an OWN property, so a queue payload or a
+ * webhook body is enough for the second one. No attacker required.
+ */
+const FORBIDDEN_KEY = "__proto__";
+
+function isForbiddenKey(key: string): boolean {
+  return key === FORBIDDEN_KEY;
+}
+
+function hasForbiddenSegment(keys: string[]): boolean {
+  return keys.some(isForbiddenKey);
+}
+
 export function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (v === null || typeof v !== "object") return false;
   const proto = Object.getPrototypeOf(v) as unknown;
@@ -21,8 +49,10 @@ function toKeys(path: string): string[] {
 
 /** Read a dot-path from a context, or `undefined` if any segment is missing. */
 export function getPath(obj: Bindings, path: string): unknown {
+  const keys = toKeys(path);
+  if (hasForbiddenSegment(keys)) return undefined;
   let cur: unknown = obj;
-  for (const key of toKeys(path)) {
+  for (const key of keys) {
     if (!isPlainObject(cur)) return undefined;
     cur = cur[key];
   }
@@ -32,6 +62,10 @@ export function getPath(obj: Bindings, path: string): unknown {
 /** Set a dot-path in a context, creating intermediate objects. Mutates `obj`. */
 export function setPath(obj: Bindings, path: string, value: unknown): void {
   const keys = toKeys(path);
+  // Refused whole rather than truncated: writing the safe prefix of a path the
+  // caller did not mean leaves a half-applied context, which is harder to reason
+  // about than nothing happening.
+  if (hasForbiddenSegment(keys)) return;
   const last = keys.pop();
   if (last === undefined) return;
   let cur: Record<string, unknown> = obj;
@@ -51,6 +85,7 @@ export function setPath(obj: Bindings, path: string, value: unknown): void {
 /** Delete a dot-path from a context. Mutates `obj`. */
 export function delPath(obj: Bindings, path: string): void {
   const keys = toKeys(path);
+  if (hasForbiddenSegment(keys)) return;
   const last = keys.pop();
   if (last === undefined) return;
   let cur: unknown = obj;
@@ -66,7 +101,13 @@ export function clone<T>(v: T): T {
   if (Array.isArray(v)) return v.map((x) => clone(x)) as unknown as T;
   if (isPlainObject(v)) {
     const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v)) out[k] = clone(val);
+    // `out[k] = ...` with k of "__proto__" reassigns this object's prototype
+    // instead of storing a value, and `JSON.parse` produces exactly that key as
+    // an own property.
+    for (const [k, val] of Object.entries(v)) {
+      if (isForbiddenKey(k)) continue;
+      out[k] = clone(val);
+    }
     return out as unknown as T;
   }
   return v;
@@ -76,6 +117,7 @@ export function clone<T>(v: T): T {
 export function deepMerge(base: Bindings, patch: Bindings): Bindings {
   const out = clone(base);
   for (const [key, val] of Object.entries(patch)) {
+    if (isForbiddenKey(key)) continue;
     const cur = out[key];
     out[key] = isPlainObject(cur) && isPlainObject(val) ? deepMerge(cur, val) : clone(val);
   }
@@ -89,6 +131,7 @@ export function deepMerge(base: Bindings, patch: Bindings): Bindings {
  */
 export function mergeMissing(target: Record<string, unknown>, patch: Bindings): void {
   for (const [key, val] of Object.entries(patch)) {
+    if (isForbiddenKey(key)) continue;
     const cur = target[key];
     if (!(key in target)) {
       target[key] = clone(val);

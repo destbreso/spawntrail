@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.1
+
+**Security. This fixes a prototype pollution vulnerability in 1.0.0.**
+
+`put()` accepted `__proto__` as a dot-path segment, so a path built from data (a
+middleware copying request fields, a generic mapper over a JSON body, a queue
+payload) could write to `Object.prototype` and affect every object in the
+process:
+
+```js
+trail.run(() => trail.put("__proto__.isAdmin", true));
+({}).isAdmin; // true, process-wide
+```
+
+The same key reached the store from the other direction with no attacker at all.
+`JSON.parse` produces `__proto__` as an OWN property, so seeding a scope from a
+webhook body or a queue payload reassigned the store's prototype, after which
+every read returned nothing for the rest of the scope, with no error and no
+warning. Logs silently lost their context.
+
+`__proto__` is now refused as a path segment and as a key in any value, in
+`put`, `get`, `del`, the copy and both merges, and through the constructor,
+`setDefaults` and the express seed.
+
+This release contains that fix and nothing else, so it is safe to take on the
+1.0 line. `constructor` and `prototype` are untouched, because on a plain object
+they are ordinary data. Everything else about 1.0.0 behaves as it did, including
+overwriting values, `del()`, and `bindings()` returning the live store; those
+change in 2.0.0.
+
+**Upgrading further:** 1.1.0 fixes crashes on circular values and stops
+`bindings()`, `pino()` and `bind()` handing out the live store. 2.0.0 makes a
+context immutable, which is a breaking change worth reading the entry for.
+
 ## 1.0.0
 
 First release of **spawntrail**, the successor to `express-session-logger` and

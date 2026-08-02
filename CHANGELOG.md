@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.1.0
+
+Documentation and one small addition, both aimed at the same thing: the question
+every `AsyncLocalStorage` library gets asked first, which is why the context is
+empty.
+
+### Added
+
+- `inScope()`: whether a scope is open here. Outside one, `put()` writes a
+  process-wide default that every later scope inherits, which is deliberate for
+  a service name and almost never what a request handler meant.
+
+### Documentation
+
+- **"When the context is empty"**, with the five causes and their fixes: a
+  callback registered outside the scope, a `run()` that was not awaited, work
+  that crossed a process boundary, a library re-entering from its own chain, and
+  a write that was a process default all along.
+- **Fastify and Koa** shown as real adapters rather than a one-line sketch,
+  including the `await` inside `run()` that the Koa shape needs.
+- **A Sentry `beforeSend` recipe.** `bindings()` is an ordinary read, so every
+  `captureException` in the process can carry the identity of the request it
+  happened in without a single call site passing it.
+
 ## 2.0.0
 
 A context is now immutable, and every path that hands one out hands out a copy.

@@ -78,6 +78,16 @@ describe("SpawnTrail core", () => {
     });
   });
 
+  it("inScope() says which side of the line the caller is on", () => {
+    const s = new SpawnTrail();
+    expect(s.inScope()).toBe(false);
+    s.run(() => {
+      expect(s.inScope()).toBe(true);
+      s.run(() => expect(s.inScope()).toBe(true));
+    });
+    expect(s.inScope()).toBe(false);
+  });
+
   it("get() survives across awaits within the same scope", async () => {
     const s = new SpawnTrail();
     await s.run({ requestId: "keep" }, async () => {

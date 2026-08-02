@@ -218,6 +218,23 @@ export class SpawnTrail {
     return this;
   }
 
+  /**
+   * Whether a scope is currently open.
+   *
+   * Worth having because the number one confusion with any `AsyncLocalStorage`
+   * library is context that reads as empty, and the cause is almost always that
+   * the code asking was never inside a scope to begin with. Outside one, `put()`
+   * writes a process default that every later scope inherits, which is
+   * deliberate for a service name and rarely what a request handler meant.
+   *
+   * ```ts
+   * if (!trail.inScope()) logger.warn("no scope here; this would set a default");
+   * ```
+   */
+  inScope(): boolean {
+    return this.als.getStore() !== undefined;
+  }
+
   /** The current correlation id, if any. */
   id(): string | undefined {
     const v = getPath(this.target(), this.idKey);

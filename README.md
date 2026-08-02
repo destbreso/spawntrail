@@ -78,20 +78,40 @@ app.use(trail.express());
 logger.info("hello"); // carries the current context
 ```
 
-### Any framework (manual scope)
+### Any framework, and any unit of work
+
+There is one express adapter because express middleware has a shape worth
+adapting to. Everything else is `run()`, which is four lines wherever you put
+them.
 
 ```ts
 import { trail } from "spawntrail";
 
-// fastify
-fastify.addHook("onRequest", (req, reply, done) => trail.run(() => { trail.ensureId(); done(); }));
+// Fastify
+fastify.addHook("onRequest", (req, reply, done) => {
+  trail.run({ route: req.routeOptions?.url }, () => {
+    reply.header("x-request-id", trail.ensureId(req.headers["x-request-id"] as string));
+    done();
+  });
+});
 
-// or wrap any unit of work: a queue job, a cron tick, a script
-await trail.run({ jobId }, async () => {
-  trail.put("attempt", 1);
+// Koa
+app.use(async (ctx, next) => {
+  await trail.run({ route: ctx.path }, async () => {
+    ctx.set("x-request-id", trail.ensureId(ctx.get("x-request-id")));
+    await next();
+  });
+});
+
+// A queue job, a cron tick, a script: the same guarantee, no HTTP involved
+await trail.run({ jobId, attempt }, async () => {
   await handle();
 });
 ```
+
+Note the `await` inside `run()` in the Koa hook. `run()` returns whatever its
+callback returns, and forgetting to await it is the most common way to end up
+with an empty context downstream.
 
 ### Any other logger (`.child()` fallback)
 
@@ -101,6 +121,60 @@ For a logger without a format/mixin hook, `bind()` wraps anything with a `.child
 export const log = trail.bind(baseLogger);
 log.info("carries context"); // a child with the live context is used per call
 ```
+
+### Beyond logging
+
+`bindings()` is an ordinary read, so anything ambient can use it. The highest
+value use found in production is not a log line at all: enriching error reports
+centrally instead of at every capture site.
+
+```ts
+Sentry.init({
+  beforeSend(event) {
+    const ctx = trail.bindings();
+    event.tags = { ...event.tags, requestId: ctx.requestId as string };
+    event.user = { ...(event.user ?? {}), ...(ctx.actor as object) };
+    return event;
+  },
+});
+```
+
+Every `captureException` anywhere in the process now carries the identity of the
+request it happened in, and no call site had to pass it. The same shape works
+for a metrics tagger, an audit log that auto-fills its actor, or anything else
+that wants to know which unit of work it is inside.
+
+---
+
+## When the context is empty
+
+This is the one problem worth documenting in advance, because it is the number
+one support question for every library built on `AsyncLocalStorage` and the
+causes are always the same handful. `trail.inScope()` tells you which side of the
+line you are on.
+
+**The callback was registered outside the scope.** An `EventEmitter` listener, a
+`setInterval`, a connection pool or client constructed at module load: whatever
+was created before the scope opened runs on its own async chain and inherits
+nothing. Move the registration inside `run()`, or capture what you need and
+reopen a scope in the handler with `run({ requestId }, fn)`.
+
+**`run()` was not awaited.** `trail.run(async () => ...)` returns a promise. If
+the caller does not await it, the scope closes while the work is still going and
+everything after the first await writes to nothing.
+
+**The work crossed a process boundary.** A queue job, a worker thread, an HTTP
+call back into yourself. `AsyncLocalStorage` is per process; carry the ids in the
+payload and reopen a scope on the other side.
+
+**A library re-entered from its own chain.** Some clients dispatch callbacks from
+a connection or a pool created at startup rather than from your call. Same fix as
+the first case.
+
+**It was never a scope, it was a default.** `put()` outside any scope writes a
+process-wide default rather than failing, which is intentional for a service
+name and confusing for anything else. `inScope()` is the check, and in a request
+path a `false` there is almost always the bug.
 
 ---
 
@@ -231,6 +305,7 @@ scope.del(path)           // remove a dot-path (refused where there is a value t
 scope.clear()             // reset the process defaults (refused inside a scope)
 scope.bindings()          // a copy of the full merged context
 scope.id() / ensureId(x)  // read / seed the correlation id
+scope.inScope()           // is a scope open here? (see "When the context is empty")
 scope.setDefaults(obj)    // process-wide bindings present in every scope
 
 // logger integrations (inject at log time)

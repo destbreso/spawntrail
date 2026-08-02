@@ -14,6 +14,7 @@ export type {
   NextLike,
   WinstonFormatLike,
   ChildLogger,
+  Contributor,
 } from "./context";
 export type { Bindings, ViolationHandler, ViolationReason } from "./mdc";
 export {

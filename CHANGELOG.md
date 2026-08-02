@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.2.0
+
+Ambient values that the context should not own.
+
+### Added
+
+- **`use(contributor)`**: register a function read when a line is written and
+  stored nowhere. A contributed value is reported, never stored, so the
+  write-once rule does not apply to it, which is the point: a span id is
+  different for every span of one request, and a value that cannot be stored
+  correctly should not be stored at all. Anything actually in the context wins
+  over a contributor, and earlier registrations win over later ones. A
+  contributor that throws contributes nothing and is otherwise ignored.
+- **`spawntrail/otel`**: a contributor that puts `trace_id` and `span_id` on
+  every record, in the snake-case convention log backends auto-detect, with both
+  key names configurable and the W3C trace flags available on request. An
+  all-zero span context reports nothing, because a trace id of zeros looks like
+  a trace you can open and is not one.
+  - `@opentelemetry/api` is an **optional** peer dependency and lives behind a
+    separate entry point, so the main entry stays dependency-free and a project
+    that does not run OpenTelemetry never loads it.
+
+Contributors appear on winston records, pino records, `bind()` children,
+`bindings()`, and a `get(path)` the store cannot answer. On a read the store can
+answer, no contributor runs.
+
 ## 2.1.0
 
 Documentation and one small addition, both aimed at the same thing: the question

@@ -1,6 +1,6 @@
 {
   "name": "spawntrail",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Contextual logging for Node via AsyncLocalStorage and Mapped Diagnostic Context (MDC). Attach request-scoped context to every log line, with any logger (winston, pino) and any framework (express, fastify, koa). Zero dependencies, TypeScript-first.",
   "author": {
     "name": "David Estevez",
@@ -20,6 +20,16 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./otel": {
+      "import": {
+        "types": "./dist/otel.d.ts",
+        "default": "./dist/otel.js"
+      },
+      "require": {
+        "types": "./dist/otel.d.cts",
+        "default": "./dist/otel.cjs"
       }
     }
   },
@@ -58,18 +68,32 @@
     "pino",
     "express",
     "middleware",
-    "structured-logging"
+    "structured-logging",
+    "opentelemetry",
+    "otel",
+    "traceid",
+    "observability"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/destbreso/spawntrail.git"
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/context-async-hooks": "^1.30.1",
     "@types/node": "^20.11.0",
     "pino": "^8.17.0",
     "tsup": "^8.0.0",
     "typescript": "^5.3.0",
     "vitest": "^1.2.0",
     "winston": "^3.11.0"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
   }
 }

@@ -70,10 +70,19 @@ export interface ChildLogger {
   [key: string]: unknown;
 }
 
+/**
+ * A source of ambient bindings computed at read time rather than stored.
+ *
+ * Returning `undefined` contributes nothing, which is the normal answer when
+ * whatever the contributor reads is not active right now.
+ */
+export type Contributor = () => Bindings | undefined;
+
 export class SpawnTrail {
   private readonly als = new AsyncLocalStorage<Store>();
   private readonly idKey: string;
   private readonly idFactory: () => string;
+  private readonly contributors: Contributor[] = [];
   private base: Bindings;
 
   constructor(options: SpawnTrailOptions = {}) {
@@ -117,7 +126,9 @@ export class SpawnTrail {
    * scope start and reads it later sees the context as it was.
    */
   bindings(): Bindings {
-    return clone(this.target());
+    const out = clone(this.target());
+    this.contribute(out);
+    return out;
   }
 
   /**
@@ -180,7 +191,14 @@ export class SpawnTrail {
    * would have been false from the first line of code that tried it.
    */
   get(path?: string): unknown {
-    return path === undefined ? this.bindings() : clone(getPath(this.target(), path));
+    if (path === undefined) return this.bindings();
+    const stored = getPath(this.target(), path);
+    if (stored !== undefined) return clone(stored);
+    if (this.contributors.length === 0) return undefined;
+    // Only on a miss, so a contributor costs nothing on the common read.
+    const contributed = emptyBindings();
+    this.contribute(contributed);
+    return clone(getPath(contributed, path));
   }
 
   /**
@@ -216,6 +234,51 @@ export class SpawnTrail {
     }
     this.base = emptyBindings();
     return this;
+  }
+
+  /**
+   * Register a source of bindings computed at read time.
+   *
+   * ```ts
+   * trail.use(() => ({ pid: process.pid, version: BUILD_SHA }));
+   * trail.use(otel());   // from "spawntrail/otel"
+   * ```
+   *
+   * Two rules, and the second is the one that makes this worth having.
+   *
+   * **Contributed values are reported, never stored.** They appear on every log
+   * record and in `bindings()`, and nothing about them touches the context, so
+   * the write-once rule does not apply to them. That makes this the right home
+   * for something that legitimately changes inside one scope, which a stored
+   * value may not: `span_id` is different for every span of one request, and a
+   * feature-flag cohort can be re-evaluated mid-flight.
+   *
+   * **Anything actually in the context wins.** A contributor fills a key only
+   * where nothing more specific already answered, and earlier registrations win
+   * over later ones. (RFC-005 proposed placing contributors between scope values
+   * and process defaults; they are not separable once a scope has opened, and
+   * "explicit beats computed" is the rule that can be stated in one line.)
+   *
+   * A contributor that throws contributes nothing and is otherwise ignored,
+   * because a log call is the wrong place to discover that a telemetry SDK is
+   * unhappy.
+   */
+  use(contributor: Contributor): this {
+    this.contributors.push(contributor);
+    return this;
+  }
+
+  /** Fill `into` from every contributor, in registration order, without overwriting. */
+  private contribute(into: Record<string, unknown>): void {
+    for (const contributor of this.contributors) {
+      let extra: Bindings | undefined;
+      try {
+        extra = contributor();
+      } catch {
+        continue;
+      }
+      if (extra) mergeMissing(into, extra);
+    }
   }
 
   /**
@@ -269,6 +332,7 @@ export class SpawnTrail {
     return {
       transform(info: Record<string, unknown>): Record<string, unknown> {
         mergeMissing(info, scope.target());
+        scope.contribute(info);
         return info;
       },
     };
@@ -284,7 +348,11 @@ export class SpawnTrail {
    * emitted outside any scope wrote into the process defaults for good.
    */
   pino(): () => Bindings {
-    return () => clone(this.target());
+    return () => {
+      const out = clone(this.target());
+      this.contribute(out);
+      return out;
+    };
   }
 
   /**
@@ -302,7 +370,9 @@ export class SpawnTrail {
         if (prop === "child" || typeof prop === "symbol") {
           return Reflect.get(target, prop, receiver);
         }
-        const child = target.child(clone(scope.target()));
+        const bindings = clone(scope.target());
+        scope.contribute(bindings);
+        const child = target.child(bindings);
         const value = Reflect.get(child, prop, child);
         return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(child) : value;
       },

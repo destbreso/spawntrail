@@ -122,6 +122,37 @@ export const log = trail.bind(baseLogger);
 log.info("carries context"); // a child with the live context is used per call
 ```
 
+### Trace ids, and anything else ambient
+
+Some values are ambient but are not the context's to own: a trace id changes per
+span inside one request, a process id never changes at all, and neither is
+something a request handler should be writing. `use()` registers a function that
+is read when a line is written and stored nowhere.
+
+```ts
+import { trail } from "spawntrail";
+import { otel } from "spawntrail/otel";
+
+trail.use(otel());                                   // trace_id + span_id on every line
+trail.use(() => ({ pid: process.pid, build: SHA })); // anything else ambient
+```
+
+Nothing else changes: `winston()`, `pino()` and `bind()` already inject whatever
+the context reports. `trace_id` and `span_id` are snake case by default because
+that is the OpenTelemetry and ECS convention every log backend auto-detects, and
+both key names are configurable.
+
+`spawntrail/otel` is a separate entry point and `@opentelemetry/api` is an
+optional peer, so the main entry stays dependency-free and a project that does
+not run OpenTelemetry never loads it.
+
+Two rules. **A contributed value is reported, never stored,** so the write-once
+rule does not apply to it: that is exactly why a span id belongs here and not in
+`put()`. And **anything actually in the context wins**, with earlier
+registrations ahead of later ones. A contributor that throws contributes nothing
+and is otherwise ignored, because a log call is the wrong place to find out that
+a telemetry SDK is unhappy.
+
 ### Beyond logging
 
 `bindings()` is an ordinary read, so anything ambient can use it. The highest
@@ -306,6 +337,7 @@ scope.clear()             // reset the process defaults (refused inside a scope)
 scope.bindings()          // a copy of the full merged context
 scope.id() / ensureId(x)  // read / seed the correlation id
 scope.inScope()           // is a scope open here? (see "When the context is empty")
+scope.use(fn)             // register an ambient source read per record, never stored
 scope.setDefaults(obj)    // process-wide bindings present in every scope
 
 // logger integrations (inject at log time)

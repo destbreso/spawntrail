@@ -55,6 +55,10 @@ const REQUIRED_VALUES = [
 // Read the entry defensively. The shape of `exports` is one of the things under
 // test, so this must be able to report a bad one rather than die on it.
 const entry = pkg.exports?.["."] ?? {};
+check("the otel subpath is published", pkg.exports?.["./otel"] !== undefined);
+check("@opentelemetry/api is an OPTIONAL peer, so the main entry stays dependency-free",
+  pkg.peerDependenciesMeta?.["@opentelemetry/api"]?.optional === true);
+check("nothing is a hard runtime dependency", Object.keys(pkg.dependencies ?? {}).length === 0);
 const target = (condition, fallback) => {
   const value = entry[condition];
   const file = typeof value === "string" ? value : value?.default;
@@ -133,8 +137,11 @@ try {
   );
   const consumer = (name) => `
 import { SpawnTrail, setViolationHandler, CLONE_WORK_LIMIT } from ${JSON.stringify(pkg.name)};
+import { otel } from ${JSON.stringify(pkg.name + "/otel")};
+void otel;
 const ${name} = new SpawnTrail({ defaults: { service: "api" } });
 setViolationHandler((event) => { const reason: string = event.reason; void reason; void event.current; });
+${name}.use(() => ({ pid: 1 }));
 ${name}.run({ requestId: "r" }, () => { ${name}.put("a.b", 1); void ${name}.get("a.b"); });
 void CLONE_WORK_LIMIT;
 `;

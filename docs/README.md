@@ -17,7 +17,8 @@ Design notes and proposals for spawntrail. Each RFC is self-contained and carrie
 
 Every finding in [FINDINGS.md](./FINDINGS.md) (F1 to F12) is closed.
 
-Remaining, in the order each one unblocks the next:
+- [RFC-002: typed context](./RFC-002-typed-context.md), in 2.5.0. Its section 6 records that the RFC's own example silently disables the feature, that the proposed two-API design was replaced by one conditional signature, and that its rule 4 was refused because RFC-001 and RFC-006 made it false.
 
-1. [RFC-002: typed context](./RFC-002-typed-context.md). Opt-in `SpawnTrail<B>` with typed accessors, defaulting to today's open bag. Pure type level, no runtime risk, so it can land at any point. What a system needs once its context becomes a contract.
-2. [RFC-003: occurrence sampling](./RFC-003-occurrence-sampling.md). Log the 1st, 10th, 100th, then every 1000th, with the count carried. The packaging question the RFC leaves open has an answer: it depends on the context for nothing, so it belongs beside this package rather than inside it.
+Remaining:
+
+1. [RFC-003: occurrence sampling](./RFC-003-occurrence-sampling.md), and the answer is that it does not belong here. It depends on the context for nothing, so it goes beside this package rather than inside it.

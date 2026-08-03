@@ -274,6 +274,55 @@ masks it at `user.account.owner.email` too: there is one node, and it carries
 the mask by every route. A path that names something about a container rather
 than a field in it, `items.length` on an array, matches nothing.
 
+### When the context becomes a contract
+
+The open bag is right for the first three lines and wrong for the system that
+matured around it. Once an audit log auto-fills its actor from the context and a
+Sentry `beforeSend` reads identity out of it, those consumers need to know that
+`actor.companyId` is there and is a string, and that nobody wrote
+`put("actor", 42)` three modules away. Declare the shape:
+
+```ts
+interface AppCtx {
+  requestId?: string;
+  actor?: { userId: string; companyId: string };
+}
+
+const trail = new SpawnTrail<AppCtx>();
+
+trail.put("actor", { userId: "u1", companyId: "c1" });  // checked
+trail.get("actor")?.companyId;                          // typed, no cast
+trail.put("actor", 42);                                 // compile error
+trail.put("acotr", actor);                              // compile error, it is a typo
+trail.put("actor.userId", "u1");                        // fine, dotted paths stay open
+```
+
+Write the interface on its own, NOT as `extends Bindings`. Inheriting a string
+index signature turns `keyof AppCtx` into `string`, so every key type checks and
+every value is `unknown`: the feature is silently off, and it looks like it is
+working.
+
+Four things worth knowing:
+
+- **The default is unchanged.** `new SpawnTrail()` is the open bag it has always
+  been, and the shared `trail` export stays untyped, because one object shared
+  by every library in the process cannot honestly carry anyone's shape.
+- **Only top-level keys are typed.** A dot is the only thing that separates "a
+  path into a value" from "a key I forgot to declare", so anything containing
+  one stays open. Typing nested paths is template-literal gymnastics with bad
+  error messages, and a consumer holding `get("actor")` has full typing from
+  there anyway.
+- **The parameter is erased, so this is a contract with the compiler and not a
+  validator.** A JavaScript caller writes what it likes, and so does a generic
+  library holding the untyped type. That interop is deliberate rather than a
+  leak: your logging layer should not break the moment a dependency logs
+  through it.
+- **`bindings()` and `snapshot()` are deliberately NOT typed as your shape.**
+  Contributors add keys the shape never mentioned, a redaction policy replaces a
+  declared object with a censor string, and a snapshot arrives off a wire that
+  nobody validated. Those are the three places where an erased type parameter
+  would stop being a convenience and start being a lie.
+
 ### Beyond logging
 
 `bindings()` is an ordinary read, so anything ambient can use it. The highest
@@ -456,6 +505,7 @@ What is left, and what this package is for: real MDC semantics over your own log
 
 ```ts
 const scope = new SpawnTrail({ idKey?, idFactory?, defaults?, envelopeKey?, redact? });
+const typed = new SpawnTrail<AppCtx>();  // optional: top-level keys become a contract
 
 // context
 scope.run(bindings, fn)   // open a scope (seeded, merged over parent/defaults); returns fn()

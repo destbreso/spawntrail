@@ -197,6 +197,27 @@ const snap = ${name}.snapshot();
 ${name}.restore(snap, { kind: "queue", name: "q" }, () => { void ${name}.unstamp(${name}.stamp({ a: 1 })); });
 ${name}.run({ requestId: "r" }, () => { ${name}.put("a.b", 1); void ${name}.get("a.b"); });
 void CLONE_WORK_LIMIT;
+
+// The declared shape has to survive the declaration rollup, and the only way to
+// know is to make the published types refuse something. Each @ts-expect-error
+// below fails this compile if the shape check did NOT make it into the .d.ts.
+interface Ctx${name} { requestId?: string; actor?: { userId: string; companyId: string } }
+const typed${name} = new SpawnTrail<Ctx${name}>();
+typed${name}.put("actor", { userId: "u", companyId: "c" });
+const companyId${name}: string | undefined = typed${name}.get("actor")?.companyId;
+void companyId${name};
+typed${name}.put("actor.userId", "still open");
+// @ts-expect-error -- wrong value for a declared key
+typed${name}.put("actor", 42);
+// @ts-expect-error -- a top-level key the shape does not declare
+typed${name}.put("acotr", 1);
+// @ts-expect-error -- and the defaults must not decide the shape
+new SpawnTrail<Ctx${name}>({ defaults: { actor: "alice" } });
+
+// The README's headline example, which did not compile before the format's
+// return type was widened to what it actually is.
+const combined${name}: { transform(info: any): any } = ${name}.winston();
+void combined${name};
 `;
   writeFileSync(join(sandbox, "esm.mts"), consumer("esm"));
   writeFileSync(join(sandbox, "cjs.cts"), consumer("cjs"));

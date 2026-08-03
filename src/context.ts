@@ -32,13 +32,35 @@ export interface Store {
   bindings: Bindings;
 }
 
-export interface SpawnTrailOptions {
+/**
+ * A path this instance accepts: a key of the declared shape, or any dotted path.
+ *
+ * With the default open bag, `keyof Bindings & string` is `string`, so this is
+ * `string` and nothing changes. With a declared shape it is the union of your
+ * top-level keys plus anything containing a dot, which is what makes
+ * `put("acotr", x)` a compile error while `put("actor.email", x)` stays open.
+ * A dot is the only thing that distinguishes "a path into a value" from "a
+ * top-level key I forgot to declare", so it is what the type keys on.
+ */
+export type ContextPath<B> = (keyof B & string) | `${string}.${string}`;
+
+/**
+ * What is stored at `P`, or `unknown` where the shape says nothing about it.
+ *
+ * Always widened with `undefined` at the read site: a context fills up over the
+ * life of a request, so a key being declared is never a promise that it is
+ * there yet. That is the same reason `put("userId", req.user?.id)` before
+ * authentication resolves has to be a no-op rather than a write.
+ */
+export type ValueAt<B, P> = P extends keyof B ? B[P] : unknown;
+
+export interface SpawnTrailOptions<B = Bindings> {
   /** Key under which the correlation id is stored. Default `"requestId"`. */
   idKey?: string;
   /** Factory for a fresh correlation id. Default `crypto.randomUUID`. */
   idFactory?: () => string;
   /** Process-wide base bindings, present in every scope (e.g. service, stage). */
-  defaults?: Bindings;
+  defaults?: Partial<B> & Bindings;
   /** Key a snapshot travels under when crossing a boundary. Default `ENVELOPE_KEY`. */
   envelopeKey?: string;
   /** Paths this instance never publishes. Equivalent to calling `redact()` once. */
@@ -55,20 +77,30 @@ export interface ResponseLike {
 }
 export type NextLike = (err?: unknown) => void;
 
-export interface ExpressOptions {
+export interface ExpressOptions<B = Bindings> {
   /** Read an incoming id from this header, e.g. `"x-request-id"`. */
   idHeader?: string;
   /** Derive the correlation id from the request (wins over `idHeader`). */
   id?: (req: RequestLike) => string | undefined;
   /** Derive extra bindings from the request. */
-  bindings?: (req: RequestLike) => Bindings;
+  bindings?: (req: RequestLike) => Partial<B> & Bindings;
   /** Echo the resolved id back on this response header. */
   setResponseHeader?: string;
 }
 
-/** A winston-format-shaped object: `{ transform(info) => info }`. */
+/**
+ * A winston-format-shaped object: `{ transform(info) => info }`.
+ *
+ * Generic in the record it is handed, and returning that same type, because the
+ * format enriches a record in place and hands back the one it was given. The
+ * non-generic version returned `Record<string, unknown>`, which is not
+ * assignable to winston's `TransformableInfo | boolean`, so
+ * `winston.format.combine(trail.winston(), ...)`, the example at the top of the
+ * README, did not compile in a TypeScript project. The tests never caught it
+ * because they were excluded from `tsconfig.json`.
+ */
 export interface WinstonFormatLike {
-  transform(info: Record<string, unknown>): Record<string, unknown>;
+  transform<T extends Record<string, unknown>>(info: T): T & Bindings;
 }
 
 /** Any logger exposing a `child(bindings) => logger` method (winston, pino, bunyan). */
@@ -121,7 +153,38 @@ function isSnapshot(value: unknown): value is Snapshot {
   );
 }
 
-export class SpawnTrail {
+/**
+ * @typeParam B the shape of this context, when it has one.
+ *
+ * Defaults to the open bag, so `new SpawnTrail()` is byte for byte what it has
+ * always been and every existing call site keeps compiling. Declare a shape and
+ * the top-level keys become a contract:
+ *
+ * ```ts
+ * interface AppCtx {
+ *   requestId?: string;
+ *   actor?: { userId: string; companyId: string };
+ * }
+ * const trail = new SpawnTrail<AppCtx>();
+ * trail.put("actor", { userId: "u", companyId: "c" });  // checked
+ * trail.get("actor")?.companyId;                        // typed, no cast
+ * ```
+ *
+ * Write the interface on its own. RFC-002 proposed `interface AppCtx extends
+ * Bindings`, which quietly defeats the whole feature: extending a type with a
+ * string index signature makes `keyof AppCtx` into `string`, so every key type
+ * checks and every value is `unknown`. For the same reason the constraint here
+ * is `object` and not `Bindings`: an interface without an index signature is
+ * not assignable to `Record<string, unknown>`, so constraining to `Bindings`
+ * would reject exactly the declaration people write.
+ *
+ * The parameter is erased, so this is a contract with the compiler and not a
+ * validator. A JavaScript caller, or anything holding the untyped instance, can
+ * still write whatever it likes. That interop is deliberate: a generic library
+ * logging through the shared `trail` must keep working against an application
+ * that has declared a shape.
+ */
+export class SpawnTrail<B extends object = Bindings> {
   private readonly als = new AsyncLocalStorage<Store>();
   private readonly idKey: string;
   private readonly idFactory: () => string;
@@ -130,7 +193,15 @@ export class SpawnTrail {
   private readonly policy = new Redactor();
   private base: Bindings;
 
-  constructor(options: SpawnTrailOptions = {}) {
+  /**
+   * `NoInfer` because otherwise `defaults` decides the shape.
+   *
+   * `new SpawnTrail({ defaults: { service: "api" } })` would infer
+   * `B = { service: string }`, quietly turning an open bag into a one-key
+   * contract that then rejects `put("requestId", id)` on the next line. The
+   * shape comes from the type argument or not at all.
+   */
+  constructor(options: SpawnTrailOptions<NoInfer<B>> = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
     this.envelopeKey = options.envelopeKey ?? ENVELOPE_KEY;
@@ -145,7 +216,7 @@ export class SpawnTrail {
   /** Open a context scope and run `fn` inside it. */
   run<T>(fn: () => T): T;
   /** Open a context scope seeded with `bindings` (merged over any parent scope) and run `fn` inside it. */
-  run<T>(bindings: Bindings | undefined, fn: () => T): T;
+  run<T>(bindings: (Partial<B> & Bindings) | undefined, fn: () => T): T;
   run<T>(bindingsOrFn: Bindings | undefined | (() => T), maybeFn?: () => T): T {
     const fn = (typeof bindingsOrFn === "function" ? bindingsOrFn : maybeFn) as () => T;
     const bindings = typeof bindingsOrFn === "function" ? undefined : bindingsOrFn;
@@ -243,7 +314,18 @@ export class SpawnTrail {
    * followed by `put("user.role", "admin")` from writing `role` into the
    * application's own `u`.
    */
-  put(path: string, value: unknown): this {
+  put<P extends ContextPath<B>>(path: P, value: ValueAt<B, P>): this {
+    return this.write(path, value);
+  }
+
+  /**
+   * The same write, without the shape check.
+   *
+   * The library writes paths it computed rather than paths someone declared,
+   * `idKey` above all, and those are plain strings that no shape knows about.
+   * They go through here instead of widening `put()` back to `string`.
+   */
+  private write(path: string, value: unknown): this {
     if (value === undefined) return this;
     const target = this.target();
     const current = getPath(target, path);
@@ -268,6 +350,8 @@ export class SpawnTrail {
    * and may legitimately need it, and a mask that reached back into the store
    * would turn a logging policy into data loss.
    */
+  get(): Bindings;
+  get<P extends ContextPath<B>>(path: P): ValueAt<B, P> | undefined;
   get(path?: string): unknown {
     if (path === undefined) return this.bindings();
     const stored = getPath(this.target(), path);
@@ -286,7 +370,7 @@ export class SpawnTrail {
    * `put()` is: deleting and setting again would be the write-once rule with a
    * door in the back of it. Removing a key that was never set is a no-op.
    */
-  del(path: string): this {
+  del(path: ContextPath<B>): this {
     const current = getPath(this.target(), path);
     if (current !== undefined) {
       refuseImmutable(path, current, undefined);
@@ -433,7 +517,7 @@ export class SpawnTrail {
     const existing = this.id();
     if (existing) return existing;
     const id = provided ?? this.idFactory();
-    this.put(this.idKey, id);
+    this.write(this.idKey, id);
     return id;
   }
 
@@ -443,7 +527,7 @@ export class SpawnTrail {
    * Same rule as `put()`: a default that already has a value keeps it. Use
    * `clear()` outside any scope to start over.
    */
-  setDefaults(bindings: Bindings): this {
+  setDefaults(bindings: Partial<B> & Bindings): this {
     this.base = deepMergeKeeping(this.base, bindings);
     return this;
   }
@@ -533,7 +617,10 @@ export class SpawnTrail {
   restore<T>(snapshot: Snapshot | undefined, boundary: BoundaryDescriptor, fn: () => T): T {
     const seed: Bindings = { ...(snapshot?.bindings ?? {}) };
     seed.boundary = { kind: boundary.kind, name: boundary.name };
-    return this.run(seed, () => {
+    // Cast, and the reason is the same one that keeps `Snapshot` untyped: this
+    // came off a wire, so calling it the declared shape would be a claim about
+    // data nobody validated.
+    return this.run(seed as Partial<B> & Bindings, () => {
       // Mints only when nothing came across, which is rules 1 and 3 at once.
       this.ensureId();
       return fn();
@@ -546,7 +633,7 @@ export class SpawnTrail {
   winston(): WinstonFormatLike {
     const scope = this;
     return {
-      transform(info: Record<string, unknown>): Record<string, unknown> {
+      transform<T extends Record<string, unknown>>(info: T): T & Bindings {
         mergeMissing(info, scope.published());
         scope.contribute(info, true);
         return info;
@@ -598,7 +685,7 @@ export class SpawnTrail {
   // ── framework adapter ───────────────────────────────────────────────────────
 
   /** Express/connect middleware: opens a scope per request, seeds a correlation id and optional bindings. */
-  express(options: ExpressOptions = {}) {
+  express(options: ExpressOptions<B> = {}) {
     const scope = this;
     return function spawntrailMiddleware(req: RequestLike, res: ResponseLike, next: NextLike): void {
       let provided = options.id?.(req);

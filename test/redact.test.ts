@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { REDACTED, SpawnTrail, setViolationHandler } from "../src/index";
-import type { ViolationReason } from "../src/index";
+import type { ChildLogger, ViolationReason } from "../src/index";
 
 /**
  * The feature exists because of what makes the package useful: a field put in
@@ -39,7 +39,7 @@ describe("a declared path never reaches a log record", () => {
 
       const seen: Array<Record<string, unknown>> = [];
       const logger = { child: (b: Record<string, unknown>) => (seen.push(b), { info: () => undefined }) };
-      void trail.bind(logger as never).info;
+      void trail.bind(logger as unknown as ChildLogger).info;
       expect(seen[0]).toMatchObject({ authorization: REDACTED, user: { email: REDACTED } });
     });
   });
@@ -93,7 +93,7 @@ describe("what is stored is untouched, which is the whole split", () => {
     const trail = new SpawnTrail({ redact: { paths: ["user.email"] } });
     trail.run(() => {
       trail.put("user", { id: 7, email: "a@b.c" });
-      const record = trail.winston().transform({ message: "m" }) as { user: Record<string, unknown> };
+      const record = trail.winston().transform({ message: "m" }) as unknown as { user: Record<string, unknown> };
       record.user.id = "tampered";
       record.user.email = "leaked";
       expect(trail.get("user")).toEqual({ id: 7, email: "a@b.c" });

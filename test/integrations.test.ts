@@ -50,7 +50,7 @@ describe("winston format", () => {
     logger.info("bare");
     await delay(20);
     expect(lines[0]).toMatchObject({ message: "bare" });
-    expect(lines[0].requestId).toBeUndefined();
+    expect(lines[0]!.requestId).toBeUndefined();
   });
 });
 
@@ -67,7 +67,7 @@ describe("pino mixin", () => {
     await delay(20);
 
     expect(lines[0]).toMatchObject({ msg: "hi", requestId: "p1", tenant: "acme" });
-    expect(lines[1].requestId).toBeUndefined();
+    expect(lines[1]!.requestId).toBeUndefined();
   });
 });
 

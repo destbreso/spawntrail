@@ -88,8 +88,17 @@ export interface RedactOptions {
    * can read off the page is a policy a reviewer can approve.
    */
   paths: string[];
-  /** What a matched value becomes: a fixed value, or a {@link Censor}. Default {@link REDACTED}. */
-  censor?: unknown | Censor;
+  /**
+   * What a matched value becomes: a fixed value, or a {@link Censor}. Default
+   * {@link REDACTED}.
+   *
+   * The fixed alternatives are spelled out rather than typed as `unknown`,
+   * because `unknown | Censor` collapses to `unknown` and a function written
+   * inline then gets no contextual type at all: `censor: (v) => mask(v)` left
+   * `v` implicitly `any`, which is an error in any project with `noImplicitAny`
+   * on. For an object or an array, return one from a function.
+   */
+  censor?: Censor | string | number | boolean | null;
   /** Drop the key instead of masking it. Default false. */
   remove?: boolean;
 }

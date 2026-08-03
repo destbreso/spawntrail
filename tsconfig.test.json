@@ -1,0 +1,14 @@
+{
+  // The tests are excluded from the build config so they stay out of the emitted
+  // declarations, and the consequence was that `tsc --noEmit` never looked at
+  // them. That is fine for a suite whose assertions are all runtime, and useless
+  // for `test/typed.test.ts`, where the assertions ARE the type errors: every
+  // `@ts-expect-error` in it was silently doing nothing.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src", "test", "scripts"],
+  "exclude": ["node_modules", "dist"]
+}

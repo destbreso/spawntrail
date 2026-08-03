@@ -1,6 +1,6 @@
 # RFC-002: Typed context (a shape-parameterized SpawnTrail)
 
-**Status**: proposed, not started.
+**Status**: shipped in 2.5.0. Section 2's example does not work as written and section 2's API was not the one built; both are explained in section 6.
 
 ## 1. The pain (real, and it cost an adoption)
 
@@ -50,6 +50,18 @@ trail.run({ requestId: "r1" }, fn); // seed checked against AppCtx
 2. **One store, two views.** `set`/`value` and `put`/`get` read and write the SAME bindings. A typed app can still accept a `put` from a generic library (that interop is a feature, not a leak).
 3. **The shared `trail` export stays untyped.** Typed instances are application-owned (`new SpawnTrail<AppCtx>()`); the shared singleton cannot honestly carry anyone's shape.
 4. **If RFC-001 lands, `snapshot()`/`restore()` type through**: `snapshot(): Snapshot<B>`, `restore(s: Snapshot<B> | undefined, ...)`. The boundary keeps the shape.
+
+## 6. What shipped, and where it departs from the above
+
+Sections 1, 3 and 4 shipped as written: opt in, default open bag, no runtime validation, no nested-path typing, the shared `trail` export left untyped. Section 2 did not survive contact with the compiler.
+
+**Its example silently disables the whole feature.** `interface AppCtx extends Bindings` inherits a string index signature, which makes `keyof AppCtx` into `string`, so `K extends keyof B` accepts any key and `B[K]` is `unknown`. The declaration compiles, the accessors compile, nothing is ever refused, and it looks like it is working. Worse, the constraint the section proposes, `B extends Bindings`, cannot be satisfied by the interface people actually want to write: an interface with no index signature is not assignable to `Record<string, unknown>`. So the shape must be declared standalone and the constraint is `object`. Both facts were established with a compiler probe before any of this was built, which is the only reason the design is not the one in section 2.
+
+**There are no `set` and `value` methods.** The proposal was a second, typed pair alongside the stringly `put`/`get`, and two APIs over one store is a cost paid at every call site forever, in a package whose selling point is that call sites never mention the context. One conditional signature does the whole job instead: `put<P extends ContextPath<B>>(path: P, value: ValueAt<B, P>)`, where `ContextPath<B>` is `(keyof B & string) | \`${string}.${string}\`` and `ValueAt<B, P>` is `P extends keyof B ? B[P] : unknown`. With the default bag both collapse to `string` and `unknown`, so nothing changes; with a shape, a declared key is checked, a dotted path stays open, and an undeclared top-level key is a compile error. A dot is the only thing that distinguishes a path into a value from a key somebody mistyped, and that is what the type keys on. `set`/`value` would also have been a poor pair to name, since `set` reads as the partner of `get` and `get` is taken.
+
+**Rule 4 is refused: `snapshot()` and `restore()` do NOT type through, and neither does `bindings()`.** The RFC wrote that before RFC-001 and RFC-006 existed, and between them they make it false three ways. Contributors put keys on the published view that the shape never mentions. A redaction policy replaces a declared object with a censor string, so a shape saying `actor: { userId: string }` would be describing the literal `"[redacted]"`. And a snapshot arrives off a wire, so typing it is a claim about data nobody validated, in a feature whose own section 3 says it does not validate. Those are exactly the places where an erased parameter stops being a convenience and starts being a lie, so all three stay `Bindings`.
+
+**One thing the RFC could not have anticipated:** the `defaults` option had to go into a `NoInfer` position. Without it, `new SpawnTrail({ defaults: { service: "api" } })` infers `B = { service: string }` from the argument, quietly converting an open bag into a one-key contract that rejects `put("requestId", id)` on the very next line. That would have broken existing code, which rule 1 forbids. It was caught by an existing test, and only because building this feature was also the thing that revealed `tsconfig.json` excluded `test` from `tsc` entirely. Turning that on immediately found two defects that had been shipping for versions: `winston.format.combine(trail.winston(), ...)`, the example at the top of the README, did not compile for a TypeScript consumer, and a `censor` written inline got an implicitly `any` parameter. A type-level feature is worth very little in a repo where the types of the calling code are never checked.
 
 ## 5. Evidence this shape works
 

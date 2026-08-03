@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.5.0
+
+An optional shape. The open bag is right for the first three lines and wrong for
+the system that matured around it: once an audit log auto-fills its actor from
+the context, that consumer needs to know `actor.companyId` is there and is a
+string. This is that, opt in, with the bag still the default.
+
+### Added
+
+- **`SpawnTrail<B>`**, generic over the shape of its context and defaulting to
+  today's open bag. `put`, `get`, `del`, `run`, `setDefaults`, the `defaults`
+  option and the `express` mapper all check against `B`. `ContextPath<B>` and
+  `ValueAt<B, P>` are exported for anyone building on top.
+- **`tsconfig.test.json`**, and `npm run typecheck` now covers `test` and
+  `scripts` as well as `src`.
+
+### How it behaves, and why
+
+- **Declare the interface on its own, not as `extends Bindings`.** Inheriting a
+  string index signature turns `keyof` into `string`, so every key type checks
+  and every value is `unknown`: the feature is silently off while looking like
+  it works. For the same reason `B` is constrained to `object` and not to
+  `Bindings`, since an interface without an index signature is not assignable to
+  `Record<string, unknown>`.
+- **Only top-level keys are typed.** A dot is the only thing separating "a path
+  into a value" from "a key I forgot to declare", so anything containing one
+  stays open, and a top-level key the shape does not declare is a compile error.
+- **The shape comes from the type argument or not at all.** The `defaults`
+  option is in a `NoInfer` position, so `new SpawnTrail({ defaults: { service:
+  "api" } })` stays an open bag instead of silently inferring a one-key contract
+  that then rejects the next `put`.
+- **`bindings()` and `snapshot()` are deliberately not typed as the shape.**
+  Contributors add keys it never mentioned, a redaction policy replaces a
+  declared object with a censor string, and a snapshot arrives off a wire nobody
+  validated. Those are the three places an erased parameter would stop being a
+  convenience and start being a lie.
+- **The parameter is erased, so it is a contract with the compiler, not a
+  validator.** A generic library holding the untyped type can still write
+  whatever it likes into an application's typed instance, which is interop
+  rather than a leak.
+
+### Fixed
+
+- **`winston.format.combine(trail.winston(), ...)` did not compile** in a
+  TypeScript project. `WinstonFormatLike.transform` returned
+  `Record<string, unknown>`, which is not assignable to winston's
+  `TransformableInfo | boolean`, so the example at the top of the README was a
+  type error for anyone who tried it. It now takes and returns the record it is
+  handed, widened with the keys it adds.
+- **A `censor` written inline had an implicitly `any` parameter**, which is an
+  error under `noImplicitAny`. `censor?: unknown | Censor` collapses to
+  `unknown`, so nothing gave the function a contextual type. The fixed
+  alternatives are now spelled out.
+
+Both of those had been shipping for versions, and neither was caught because
+`tsconfig.json` excluded `test`, so `tsc` had never once looked at the file that
+uses this package the way a consumer does.
+
 ## 2.4.1
 
 **Upgrade from 2.4.0 if you use `redact()`.** In 2.4.0 the policy could publish

@@ -138,9 +138,12 @@ trail.use(() => ({ pid: process.pid, build: SHA })); // anything else ambient
 ```
 
 Nothing else changes: `winston()`, `pino()` and `bind()` already inject whatever
-the context reports. `trace_id` and `span_id` are snake case by default because
-that is the OpenTelemetry and ECS convention every log backend auto-detects, and
-both key names are configurable.
+the context reports. The defaults are `trace_id` and `span_id`, the names
+OpenTelemetry gives them, and both keys are configurable because that spelling
+is not universal: the Elastic Common Schema calls the same two fields `trace.id`
+and `span.id`. The
+only thing that has to be true is that the names match what your backend
+correlates on, which is the subject of "Where the fields end up".
 
 `spawntrail/otel` is a separate entry point and `@opentelemetry/api` is an
 optional peer, so the main entry stays dependency-free and a project that does
@@ -362,9 +365,12 @@ Four things worth knowing:
 
 ### Beyond logging
 
-`bindings()` is an ordinary read, so anything ambient can use it. The highest
-value use found in production is not a log line at all: enriching error reports
-centrally instead of at every capture site.
+Nothing in here is really about logs. A log line is just the most common record
+that wants to say which unit of work it belongs to, and `bindings()` is an
+ordinary read, so anything that writes such a record can ask.
+
+**Error reports**, which is the highest value use found in production and is not
+a log line at all:
 
 ```ts
 Sentry.init({
@@ -378,13 +384,130 @@ Sentry.init({
 ```
 
 Every `captureException` anywhere in the process now carries the identity of the
-request it happened in, and no call site had to pass it. The same shape works
-for a metrics tagger, an audit log that auto-fills its actor, or anything else
-that wants to know which unit of work it is inside.
+request it happened in, and no call site had to pass it. A metrics tagger is the
+same four lines against a different SDK.
 
-`bindings()` is a publish, so a redaction policy applies to it. That is the
-right answer here: an error tracker is exactly the kind of third-party
-destination the policy exists for.
+**Records you write yourself.** Plenty of systems keep their own trail in a table
+rather than in a log backend: an audit log, an outbox, an events table, a row per
+job run. Those writes have exactly the problem log lines have, one level up. The
+columns that say who and which request are known at the edge, and the insert
+happens in a service that took none of it as a parameter.
+
+```ts
+export async function audit(action: string, detail: object) {
+  const ctx = trail.bindings();
+  await db.insert("audit_log", {
+    action,
+    detail,
+    request_id: ctx.requestId,
+    actor_id: (ctx.actor as { userId?: string } | undefined)?.userId,
+    at: new Date(),
+  });
+}
+```
+
+One thing to get right here, and it is the opposite of the error-tracker case.
+`bindings()` is a publish, so a redaction policy masks it, and that is correct
+for Sentry: a third-party destination with its own retention is the reason the
+policy exists. Your own audit table is frequently the opposite, the system of
+record that logs are being kept away from, and a masked email in it is a lost
+value rather than a protected one. Read those by name. `get("user.email")` is a
+deliberate read of something the application put there itself and comes back
+raw, so a write can take its correlation ids from `bindings()` and its
+sensitive columns from `get()`, and each destination gets what it is entitled
+to. If that insert would rather fail than write a null actor, that is what the
+declared shape above is for.
+
+**The next hop.** A queue is not the only boundary a unit of work crosses. When
+one service calls another over HTTP, the far side has its own context to build
+and needs nothing from yours except the thread to hang it on:
+
+```ts
+const correlate = (headers: Headers): Headers => {
+  const id = trail.id();
+  if (id) headers.set("x-request-id", id);
+  return headers;
+};
+```
+
+The receiver's `express({ idHeader: "x-request-id" })` adopts that id instead of
+minting a second one, so both services write lines you can join. Send the id
+only when there is one: outside a scope `id()` returns `undefined`, and a
+service-wide fallback there would be a correlation id that correlates
+everything with everything.
+
+---
+
+### Where the fields end up
+
+Backends are not this package's business, and that is the useful part: the
+context is merged into the log RECORD, upstream of everything that decides what
+happens to it.
+
+**Every winston transport gets it, and none of them has to know.** A format
+registered on the logger runs once per record, before that record reaches the
+transports, so one line at the top enriches Console, File, HTTP, a CloudWatch
+transport, an Elasticsearch transport and whatever you wrote yourself:
+
+```ts
+const logger = winston.createLogger({
+  format: winston.format.combine(trail.winston(), winston.format.json()),
+  transports: [
+    new winston.transports.Console(),
+    new CloudWatchTransport(options),  // or Elasticsearch, or Datadog, or yours
+  ],
+});
+```
+
+A transport carrying its own `format` still gets the context, because a transport
+format runs on the record the logger's format already produced. That also gives
+you the escape hatch in the other direction: put `trail.winston()` in a single
+transport's format and only that transport is enriched, which is how the file you
+grep carries the context and the console you read by eye stays quiet.
+
+**The fields still have to survive serialization.** `format.json()` writes them;
+a `printf` that interpolates only `message` renders a line that does not have
+them, even though the record did. Pino has no equivalent trap, since the mixin
+merges into the JSON object the logger is about to write.
+
+**CloudWatch.** Two ways in, and the choice changes nothing here: a transport
+that calls `PutLogEvents`, or JSON on stdout, which Lambda captures for you and
+a log driver or the agent captures anywhere else. What lands either way is a
+JSON event, and Logs
+Insights discovers its fields on its own and addresses nested ones with dot
+notation, which is the same path you wrote:
+
+```
+fields @timestamp, @message
+| filter requestId = "8f1c3a2e"
+| filter actor.userId = "u_42"
+| sort @timestamp asc
+```
+
+Two limits are worth knowing before you lean on that. Field discovery applies to
+Standard class log groups, and Insights extracts at most 200 fields from a JSON
+event, which is a real ceiling and one more reason not to copy a whole request
+object into context.
+
+**Elastic and Kibana.** The same JSON, and every context key is a field:
+`requestId : "8f1c3a2e"` in KQL, `actor.userId : "u_42"` for the nested one.
+The one place a backend changes what you configure is the trace identifiers.
+OpenTelemetry names them `trace_id` and `span_id`, which is what `otel()`
+contributes by default, and the Elastic Common Schema names them `trace.id` and
+`span.id`:
+
+```ts
+trail.use(otel({ traceIdKey: "trace.id", spanIdKey: "span.id" }));
+```
+
+A key with a dot in it is a literal key and not a path, so that lands as
+`"trace.id"` on the record, which is the flat dotted form the ecs-logging
+libraries emit and Elastic indexes as the nested ECS field.
+
+Loki, Datadog, Honeycomb, Splunk, a Postgres table: there is no integration to
+write for any of them. They all read fields off a record, and the record has the
+fields before anything ships it. The only two things this package owes you are
+that they are there and that the ones you declared secret are not.
 
 ---
 

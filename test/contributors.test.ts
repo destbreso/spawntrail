@@ -127,7 +127,7 @@ describe("the OpenTelemetry contributor", () => {
     expect(trail.bindings()).toEqual({});
   });
 
-  it("puts trace_id and span_id on the record, in the convention backends detect", async () => {
+  it("puts trace_id and span_id on the record, the names OpenTelemetry gives them", async () => {
     const trail = new SpawnTrail().use(otel());
     await withSpan(REAL, () => {
       trail.run({ requestId: "r1" }, () => {
@@ -146,6 +146,21 @@ describe("the OpenTelemetry contributor", () => {
     );
     await withSpan(REAL, () => {
       expect(trail.bindings()).toEqual({ traceId: REAL.traceId, spanId: REAL.spanId, trace_flags: "01" });
+    });
+  });
+
+  // The ECS names are the documented answer for anyone shipping to Elastic, and
+  // they only work because a contributed key is a KEY. Route these through a
+  // path walk and `trace.id` quietly becomes a nested object nothing indexes.
+  it("emits the ECS names as flat dotted keys, not as a nested object", async () => {
+    const trail = new SpawnTrail().use(otel({ traceIdKey: "trace.id", spanIdKey: "span.id" }));
+    await withSpan(REAL, () => {
+      const bindings = trail.bindings();
+      expect(bindings).toEqual({ "trace.id": REAL.traceId, "span.id": REAL.spanId });
+      expect(JSON.stringify(bindings)).toBe(
+        `{"trace.id":"${REAL.traceId}","span.id":"${REAL.spanId}"}`,
+      );
+      expect(bindings.trace).toBeUndefined();
     });
   });
 

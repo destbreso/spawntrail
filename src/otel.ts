@@ -3,9 +3,10 @@
  *
  * Connecting traces to logs is a standing chore in every team that runs both:
  * given a slow span, find the lines that belong to it; given a suspicious line,
- * open its trace. Every log backend already knows how to do it the moment
- * `trace_id` and `span_id` are present on the record, so the whole job is
- * getting those two fields onto every line without touching a call site. That is
+ * open its trace. Every log backend already knows how to do it the moment the
+ * two identifiers are on the record under the names it correlates on, so the
+ * whole job is getting those fields onto every line without touching a call
+ * site. That is
  * the problem this package already solves for application fields, and trace
  * identifiers are just more ambient context.
  *
@@ -28,10 +29,12 @@ export interface OtelOptions {
   /**
    * Key for the trace id. Default `"trace_id"`.
    *
-   * Snake case is the default because that is the OpenTelemetry and ECS
-   * convention, and it is what Datadog, Grafana, Honeycomb, Elastic and Sentry
-   * auto-detect. Set `"traceId"` if your backend is already configured the other
-   * way; the correspondence is the only thing that matters.
+   * Snake case is the default because that is what OpenTelemetry names these
+   * two fields, and it is not universal: ECS spells the same pair `trace.id`
+   * and `span.id`, so a project shipping to Elastic sets both keys. A key
+   * containing a dot is a literal key rather than a path, so it lands in the
+   * flat dotted form the ecs-logging libraries emit. Whatever your backend
+   * correlates on, the correspondence is the only thing that matters.
    */
   traceIdKey?: string;
   /** Key for the span id. Default `"span_id"`. */

@@ -40,6 +40,60 @@ describe("winston format", () => {
     expect(lines[1]).toMatchObject({ message: "again", requestId: "r1", stage: "prod", user: { id: 99 } });
   });
 
+  // The documented promise is that ONE line at the top of the logger enriches
+  // every transport, whether or not the transport brought a format of its own.
+  // That holds because a logger format runs before the record is handed down and
+  // a transport format runs on what it produced, so a CloudWatch or Elasticsearch
+  // transport needs no wiring at all.
+  it("reaches every transport, including one carrying its own format", async () => {
+    const s = new SpawnTrail();
+    const plain = collector();
+    const owned = collector();
+    const logger = winston.createLogger({
+      format: winston.format.combine(s.winston(), winston.format.json()),
+      transports: [
+        new winston.transports.Stream({ stream: plain.stream }),
+        new winston.transports.Stream({ stream: owned.stream, format: winston.format.json() }),
+      ],
+    });
+
+    s.run({ requestId: "r1", actor: { userId: "u9" } }, () => logger.info("charged", { amount: 12 }));
+    await delay(20);
+
+    for (const { lines } of [plain, owned]) {
+      expect(lines[0]).toMatchObject({
+        message: "charged",
+        amount: 12,
+        requestId: "r1",
+        actor: { userId: "u9" },
+      });
+    }
+  });
+
+  // And the escape hatch in the other direction, which is the same fact read
+  // backwards: on one transport's format, it enriches that transport only.
+  it("enriches only the transport it is registered on, when registered there", async () => {
+    const s = new SpawnTrail();
+    const enriched = collector();
+    const bare = collector();
+    const logger = winston.createLogger({
+      transports: [
+        new winston.transports.Stream({
+          stream: enriched.stream,
+          format: winston.format.combine(s.winston(), winston.format.json()),
+        }),
+        new winston.transports.Stream({ stream: bare.stream, format: winston.format.json() }),
+      ],
+    });
+
+    s.run({ requestId: "r1" }, () => logger.info("hello"));
+    await delay(20);
+
+    expect(enriched.lines[0]).toMatchObject({ message: "hello", requestId: "r1" });
+    expect(bare.lines[0]).toMatchObject({ message: "hello" });
+    expect(bare.lines[0]!.requestId).toBeUndefined();
+  });
+
   it("adds nothing outside a scope", async () => {
     const s = new SpawnTrail();
     const { lines, stream } = collector();

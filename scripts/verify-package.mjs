@@ -50,6 +50,8 @@ const REQUIRED_VALUES = [
   "CLONE_WORK_LIMIT",
   "TRUNCATED",
   "UNREADABLE",
+  "jsonSafe",
+  "ENVELOPE_KEY",
 ];
 
 // Read the entry defensively. The shape of `exports` is one of the things under
@@ -142,6 +144,8 @@ void otel;
 const ${name} = new SpawnTrail({ defaults: { service: "api" } });
 setViolationHandler((event) => { const reason: string = event.reason; void reason; void event.current; });
 ${name}.use(() => ({ pid: 1 }));
+const snap = ${name}.snapshot();
+${name}.restore(snap, { kind: "queue", name: "q" }, () => { void ${name}.unstamp(${name}.stamp({ a: 1 })); });
 ${name}.run({ requestId: "r" }, () => { ${name}.put("a.b", 1); void ${name}.get("a.b"); });
 void CLONE_WORK_LIMIT;
 `;

@@ -1,6 +1,10 @@
 # RFC-001: Context across process boundaries (snapshot / restore)
 
-**Status**: proposed, not started. This document is the full context needed to implement it later.
+**Status**: implemented in 2.3.0.
+
+Shipped as proposed, with three decisions the RFC left open. The reserved key is `__spawntrail`, exported as `ENVELOPE_KEY` and configurable per instance, per FINDINGS F12. Rule 6's "drop or JSON-clone, decide and document" is decided: the snapshot is the JSON-safe projection, every drop is reported with reason `"not-serializable"`, and a container that became empty because everything in it was dropped does not travel while one that was empty to begin with does. And the boundary lands under a single `boundary: { kind, name }` key rather than two top-level ones, because `name` at the top level collides with real context on the first day.
+
+One thing the RFC could not have anticipated: contributors (2.2.0) are deliberately NOT captured. A process id or a span id describes the side that is running, and the consumer computes its own; carrying them across would state that the work happened somewhere it did not.
 
 ## 1. The gap
 

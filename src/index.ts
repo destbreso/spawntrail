@@ -15,7 +15,10 @@ export type {
   WinstonFormatLike,
   ChildLogger,
   Contributor,
+  Snapshot,
+  BoundaryDescriptor,
 } from "./context";
+export { ENVELOPE_KEY } from "./context";
 export type { Bindings, ViolationHandler, ViolationReason } from "./mdc";
 export {
   getPath,
@@ -24,6 +27,7 @@ export {
   deepMerge,
   deepMergeKeeping,
   clone,
+  jsonSafe,
   isForbiddenKey,
   setViolationHandler,
   resetViolationWarning,

@@ -99,7 +99,9 @@ export type ViolationReason =
   | "unreadable"
   | "invalid-path"
   /** A key that already held a value was written again with a different one. */
-  | "immutable";
+  | "immutable"
+  /** A value was left out of a snapshot because it cannot cross a serialization boundary. */
+  | "not-serializable";
 
 /**
  * Notified when an operation is refused or a value is substituted.
@@ -679,4 +681,115 @@ function mergeMissingInner(
   } finally {
     unmarkPair(ctx, target, patch);
   }
+}
+
+/**
+ * The JSON-safe projection of a context: what can cross a serialization boundary.
+ *
+ * A context may legitimately hold an Error, a Date, a class instance or a pooled
+ * client, because those are the things people log and copying them would hand
+ * back something that is not what they logged. None of them survives a round
+ * trip through a queue: an Error serializes to `{}`, a function disappears, a
+ * BigInt throws inside the serializer, and a cycle takes the whole publish call
+ * with it. A snapshot that explodes in someone's queue driver is worse than no
+ * snapshot at all.
+ *
+ * So the projection keeps exactly what comes back as the same thing: strings,
+ * finite numbers, booleans, null, and plain objects and arrays of those.
+ * Everything else is dropped and reported, because a field that quietly stopped
+ * crossing the boundary is a debugging session nobody enjoys.
+ */
+export function jsonSafe(value: Bindings): Bindings {
+  const out = projectObject(value, new Set<object>(), 0, { work: CLONE_WORK_LIMIT });
+  return out ?? emptyBindings();
+}
+
+/**
+ * @returns the projection, or `undefined` when the whole node has to be dropped.
+ *
+ * A node that STARTED empty survives as `{}`, and one that BECAME empty because
+ * everything in it was dropped does not. The difference matters on the far side:
+ * `socket: {}` on every line of a worker is noise that says a key existed and
+ * carried nothing, and the drop is already on the record through the handler.
+ */
+function projectObject(
+  source: Bindings,
+  open: Set<object>,
+  depth: number,
+  budget: CopyBudget,
+): Bindings | undefined {
+  if (open.has(source)) {
+    // A cycle cannot be written down. Dropping the back-reference keeps the rest.
+    refuse("not-serializable");
+    return undefined;
+  }
+  if (depth >= CLONE_DEPTH_LIMIT || budgetSpent(budget)) return undefined;
+
+  open.add(source);
+  try {
+    const out: Bindings = emptyBindings();
+    let seen = 0;
+    let kept = 0;
+    for (const key of ownKeys(source)) {
+      if (isForbiddenKey(key)) continue;
+      if (budgetSpent(budget)) break;
+      budget.work -= 1;
+      seen += 1;
+      const projected = projectValue(readOwn(source, key), open, depth + 1, budget);
+      if (projected === undefined) continue;
+      out[key] = projected;
+      kept += 1;
+    }
+    return seen > 0 && kept === 0 ? undefined : out;
+  } finally {
+    open.delete(source);
+  }
+}
+
+function projectValue(value: unknown, open: Set<object>, depth: number, budget: CopyBudget): unknown {
+  if (value === null) return null;
+  const type = typeof value;
+  if (type === "string" || type === "boolean") return value;
+  if (type === "number") {
+    // NaN and the infinities serialize to null, which reads as a value that was
+    // there and was empty rather than one that never made the trip.
+    if (Number.isFinite(value)) return value;
+    refuse("not-serializable");
+    return undefined;
+  }
+  if (type !== "object") {
+    // undefined, bigint, symbol, function.
+    refuse("not-serializable");
+    return undefined;
+  }
+
+  const asObject = value as object;
+  if (Array.isArray(asObject)) {
+    if (open.has(asObject)) {
+      refuse("not-serializable");
+      return undefined;
+    }
+    if (depth >= CLONE_DEPTH_LIMIT || budgetSpent(budget)) return undefined;
+    open.add(asObject);
+    try {
+      const out: unknown[] = [];
+      for (const item of asObject as unknown[]) {
+        if (budgetSpent(budget)) break;
+        budget.work -= 1;
+        const projected = projectValue(item, open, depth + 1, budget);
+        // A hole in an array cannot be expressed in JSON, so a dropped element
+        // becomes null rather than shifting everything after it.
+        out.push(projected === undefined ? null : projected);
+      }
+      return out;
+    } finally {
+      open.delete(asObject);
+    }
+  }
+
+  if (isPlainObject(asObject)) return projectObject(asObject as Bindings, open, depth, budget);
+
+  // An Error, a Date, a Map, a class instance, a socket.
+  refuse("not-serializable");
+  return undefined;
 }

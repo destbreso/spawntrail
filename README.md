@@ -153,6 +153,58 @@ registrations ahead of later ones. A contributor that throws contributes nothing
 and is otherwise ignored, because a log call is the wrong place to find out that
 a telemetry SDK is unhappy.
 
+### Across a queue
+
+`AsyncLocalStorage` follows any async continuation inside one process and stops
+dead at a serialization boundary. The worker picks the job up on a fresh chain,
+and every line it writes has lost the request that caused it: the audit entry
+says an image was resized and cannot say for whom, even though the same code
+path inline in the request says exactly that.
+
+Four functions, wired into the ONE place a payload crosses:
+
+```ts
+// publisher side, in the queue adapter
+queue.add(trail.stamp(event));
+
+// consumer side, in the worker
+const { snapshot, payload } = trail.unstamp(job.data);
+await trail.restore(snapshot, { kind: "queue", name: job.name }, () => handle(payload));
+```
+
+That is the whole wiring, and it goes at the transport rather than at call
+sites, so a publisher written next year gets provenance without knowing this
+exists. A call site that has to remember is a call site that will forget.
+
+**The correlation id is reused, never minted.** One id spans the HTTP call and
+everything it set in motion. A fresh id per job would give every line a context
+and still leave nothing to join on, and the causal chain is the point.
+
+Four more rules, each of which exists because the alternative lies:
+
+- **No scope at stamp time means the payload is untouched.** A cron tick has no
+  originating request, and a log line with no actor because no human caused the
+  work is the truth. A synthetic one is not.
+- **Restoring without a snapshot still opens a scope**, with a fresh id and the
+  boundary named, so system-initiated work correlates with itself while the
+  absence of upstream provenance stays visible.
+- **A handler that republishes keeps the origin.** Stamping an already-stamped
+  payload is a no-op, so an intermediate hop cannot claim to be the start of the
+  chain.
+- **Only what survives JSON travels.** The context may hold an `Error`, a
+  `Date` or a pooled client; none of them arrives as itself, and a `BigInt` or a
+  cycle takes the publish call down with it. The snapshot is the JSON-safe
+  projection, and every drop is reported with reason `"not-serializable"`.
+
+The envelope rides under `ENVELOPE_KEY` (`__spawntrail`), which is exported
+because it is wire surface between a producer and a consumer that may be on
+different versions. `unstamp()` strips it, so a handler receives the payload
+exactly as published and cannot spread the envelope into an entity or the next
+event.
+
+Contributors do not travel: a process id or a span id describes the side that is
+running, and the consumer computes its own.
+
 ### Beyond logging
 
 `bindings()` is an ordinary read, so anything ambient can use it. The highest
@@ -195,8 +247,8 @@ the caller does not await it, the scope closes while the work is still going and
 everything after the first await writes to nothing.
 
 **The work crossed a process boundary.** A queue job, a worker thread, an HTTP
-call back into yourself. `AsyncLocalStorage` is per process; carry the ids in the
-payload and reopen a scope on the other side.
+call back into yourself. `AsyncLocalStorage` is per process, so the scope does
+not follow. See "Across a queue" for the four functions that carry it.
 
 **A library re-entered from its own chain.** Some clients dispatch callbacks from
 a connection or a pool created at startup rather than from your call. Same fix as
@@ -305,6 +357,7 @@ Context propagation in Node is a crowded space, and most tools solve one slice o
 | CLS with a rich API, inside NestJS | [`nestjs-cls`](https://github.com/Papooch/nestjs-cls) |
 | To log the request/response themselves | [`express-winston`](https://github.com/bithavoc/express-winston), [`morgan`](https://github.com/expressjs/morgan), [`pino-http`](https://github.com/pinojs/pino-http) |
 | Pino, and you will wire the context yourself | `pino` + `AsyncLocalStorage` |
+| Context to survive a queue or a worker process | **spawntrail** (nothing else in this list does) |
 | **MDC (`put`/`get`) auto-injected into winston _or_ pino, framework-agnostic, at log time, zero-dep** | **spawntrail** |
 
 **A correlation id is all you need.** Then most of this API is weight you will not use, and `cls-rtracer` is the smaller answer.
@@ -312,8 +365,6 @@ Context propagation in Node is a crowded space, and most tools solve one slice o
 **You want the access log itself.** spawntrail never sees your response: it does not time requests, read status codes or emit a line per request. `pino-http`, `express-winston` and `morgan` do exactly that, and they compose fine with this on top.
 
 **You are all-in on NestJS.** `nestjs-cls` is more idiomatic there, with the module and injection story the framework expects.
-
-**Your context has to survive a process boundary.** `AsyncLocalStorage` is per-process, so publishing to a queue drops the scope. Carry the ids in the message payload yourself and reopen a scope on the consumer with `run({ jobId, requestId }, fn)`, which works today and is honest about what it is: manual at the boundary.
 
 **Your context is a typed contract, not a bag.** `Bindings` is `Record<string, unknown>` and `get()` returns `unknown`, so nothing checks at compile time that the field an audit log or an error reporter depends on is actually there. If those consumers need to fail closed on a missing field, a hand-rolled typed store gives you a guarantee this does not.
 
@@ -338,6 +389,12 @@ scope.bindings()          // a copy of the full merged context
 scope.id() / ensureId(x)  // read / seed the correlation id
 scope.inScope()           // is a scope open here? (see "When the context is empty")
 scope.use(fn)             // register an ambient source read per record, never stored
+
+// crossing a process boundary
+scope.snapshot()          // serializable capture of this scope, or undefined outside one
+scope.stamp(payload)      // attach it to an object payload (no-op without a scope)
+scope.unstamp(data)       // { snapshot, payload }, with the envelope stripped
+scope.restore(snap, b, fn) // reopen the scope on the other side; reuses the id
 scope.setDefaults(obj)    // process-wide bindings present in every scope
 
 // logger integrations (inject at log time)

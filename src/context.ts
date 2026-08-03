@@ -19,6 +19,8 @@ import {
   delPath,
   clone,
   deepMerge,
+  isPlainObject,
+  jsonSafe,
   deepMergeKeeping,
   emptyBindings,
   mergeMissing,
@@ -36,6 +38,8 @@ export interface SpawnTrailOptions {
   idFactory?: () => string;
   /** Process-wide base bindings, present in every scope (e.g. service, stage). */
   defaults?: Bindings;
+  /** Key a snapshot travels under when crossing a boundary. Default `ENVELOPE_KEY`. */
+  envelopeKey?: string;
 }
 
 // Minimal structural types, so spawntrail depends on no framework or logger package.
@@ -78,16 +82,54 @@ export interface ChildLogger {
  */
 export type Contributor = () => Bindings | undefined;
 
+/**
+ * The key an envelope travels under.
+ *
+ * Namespaced and exported rather than chosen at each call site, because once two
+ * services exchange a stamped payload this string is wire surface shared between
+ * a producer and a consumer that may be on different versions of this package.
+ * Renaming it later is a breaking change that looks like a patch.
+ */
+export const ENVELOPE_KEY = "__spawntrail";
+
+/** A serializable capture of a scope, small enough to ride along with a job. */
+export interface Snapshot {
+  /** Envelope format. Anything else is treated as no snapshot at all. */
+  v: 1;
+  /** The JSON-safe projection of the captured scope. The correlation id travels inside it. */
+  bindings: Bindings;
+}
+
+/** What the far side of a boundary is, for the log lines that come out of it. */
+export interface BoundaryDescriptor {
+  /** `"queue"`, `"cron"`, `"webhook"`, or whatever the application calls it. */
+  kind: string;
+  /** The specific one: `"orders/order.created"`. */
+  name: string;
+}
+
+function isSnapshot(value: unknown): value is Snapshot {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Snapshot).v === 1 &&
+    typeof (value as Snapshot).bindings === "object" &&
+    (value as Snapshot).bindings !== null
+  );
+}
+
 export class SpawnTrail {
   private readonly als = new AsyncLocalStorage<Store>();
   private readonly idKey: string;
   private readonly idFactory: () => string;
   private readonly contributors: Contributor[] = [];
+  private readonly envelopeKey: string;
   private base: Bindings;
 
   constructor(options: SpawnTrailOptions = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
+    this.envelopeKey = options.envelopeKey ?? ENVELOPE_KEY;
     // Not a spread: object spread copies `__proto__` from a JSON-parsed object
     // as an OWN property, which would put the store outside its own invariant
     // before a single call was made. Merging into an empty object applies the
@@ -322,6 +364,88 @@ export class SpawnTrail {
   setDefaults(bindings: Bindings): this {
     this.base = deepMergeKeeping(this.base, bindings);
     return this;
+  }
+
+  // ── crossing a process boundary ─────────────────────────────────────────────
+
+  /**
+   * A serializable capture of the current scope, or `undefined` outside one.
+   *
+   * Captures what is STORED, not what is reported: contributors are deliberately
+   * left out, because a process id, a build SHA or a span id belong to the side
+   * that is running, and the consumer computes its own. Re-evaluating them there
+   * is right; carrying them across is a lie about where the work happened.
+   *
+   * The capture is the JSON-safe projection, so an Error or a pooled client in
+   * the context is dropped rather than travelling as `{}`. Each drop is reported
+   * through `setViolationHandler` with reason `"not-serializable"`.
+   */
+  snapshot(): Snapshot | undefined {
+    if (!this.inScope()) return undefined;
+    return { v: 1, bindings: jsonSafe(this.target()) };
+  }
+
+  /**
+   * Attach a snapshot of the current scope to an object payload.
+   *
+   * Meant for the ONE place a payload crosses a boundary, not for call sites:
+   * instrument the queue adapter and every publisher gets provenance, including
+   * the ones written next year. A call site that has to remember is a call site
+   * that will forget.
+   *
+   * Three things it deliberately does not do. It leaves a payload that is not a
+   * plain object exactly as it is. It leaves the payload alone when there is no
+   * scope to capture, because work that no request caused should say so rather
+   * than borrow an identity. And it leaves an already-stamped payload alone, so
+   * a handler that republishes cannot overwrite the origin of the chain with its
+   * own intermediate hop.
+   */
+  stamp<T>(payload: T): T {
+    if (!isPlainObject(payload)) return payload;
+    if (Object.prototype.hasOwnProperty.call(payload, this.envelopeKey)) return payload;
+    const snapshot = this.snapshot();
+    if (snapshot === undefined) return payload;
+    // A spread rather than a filtered copy: this is the caller's payload on its
+    // way out, and it has to arrive as what they published, key for key.
+    return { ...payload, [this.envelopeKey]: snapshot } as T;
+  }
+
+  /**
+   * Split a received payload into its snapshot and the payload as published.
+   *
+   * The envelope is gone from what comes back, so a handler cannot spread it
+   * into an entity, a response, or the next event.
+   */
+  unstamp<T>(data: T): { snapshot?: Snapshot; payload: T } {
+    if (!isPlainObject(data) || !Object.prototype.hasOwnProperty.call(data, this.envelopeKey)) {
+      return { payload: data };
+    }
+    const { [this.envelopeKey]: raw, ...payload } = data as Record<string, unknown>;
+    return { snapshot: isSnapshot(raw) ? raw : undefined, payload: payload as T };
+  }
+
+  /**
+   * Rebuild a scope from a snapshot and run `fn` inside it.
+   *
+   * **The correlation id is reused, never minted, when the snapshot carries
+   * one.** That is the whole feature: background work shares the id of the
+   * request that caused it, so one id spans the HTTP call and everything it set
+   * in motion. A fresh id per job would give every line a context and still
+   * leave no way to connect them, and the causal chain is the value.
+   *
+   * With no snapshot it still opens a scope, with a fresh id and the boundary as
+   * bindings. Work started by a cron or a bare worker has no originating
+   * request, and its lines should still correlate with each other; the absence
+   * of upstream provenance stays visible instead of being invented.
+   */
+  restore<T>(snapshot: Snapshot | undefined, boundary: BoundaryDescriptor, fn: () => T): T {
+    const seed: Bindings = { ...(snapshot?.bindings ?? {}) };
+    seed.boundary = { kind: boundary.kind, name: boundary.name };
+    return this.run(seed, () => {
+      // Mints only when nothing came across, which is rules 1 and 3 at once.
+      this.ensureId();
+      return fn();
+    });
   }
 
   // ── logger integrations: inject the live context at LOG TIME ────────────────

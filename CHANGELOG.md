@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.3.0
+
+Context that survives a queue. `AsyncLocalStorage` follows any async
+continuation inside one process and stops dead at a serialization boundary, so
+a worker picks a job up on a fresh chain with no idea which request caused it.
+Nothing else in this category covers that.
+
+### Added
+
+- **`snapshot()`**, **`stamp(payload)`**, **`unstamp(data)`** and
+  **`restore(snapshot, boundary, fn)`**. Wired into the one place a payload
+  crosses, not into call sites, so a publisher written later gets provenance
+  without knowing this exists.
+- **`ENVELOPE_KEY`** (`__spawntrail`), exported because it is wire surface
+  between a producer and a consumer that may be on different versions of this
+  package. Configurable per instance with `envelopeKey`.
+- **`jsonSafe(bindings)`**: the projection a snapshot uses, exported for anyone
+  who wants the same rule elsewhere.
+- `"not-serializable"` as a violation reason.
+
+### How it behaves, and why
+
+- **The correlation id is reused, never minted** when a snapshot carries one.
+  One id spans the HTTP call and everything it set in motion; a fresh id per job
+  would give every line a context and still leave nothing to join on.
+- **No scope at stamp time leaves the payload untouched.** Work that no request
+  caused should say so rather than borrow an identity.
+- **Restoring without a snapshot still opens a scope**, with a fresh id and the
+  boundary named, so system-initiated work correlates with itself while the
+  absence of upstream provenance stays visible.
+- **Stamping an already-stamped payload is a no-op**, so a handler that
+  republishes cannot claim to be the start of the chain.
+- **Only what survives JSON travels.** An `Error`, a `Date`, a `Map`, a function
+  or a pooled client is dropped and reported; a `BigInt` or a cycle would
+  otherwise take the publish call down. A container that became empty because
+  everything in it was dropped does not travel either, while one that was empty
+  to begin with does.
+- **Contributors do not travel.** A process id or a span id describes the side
+  that is running, and the consumer computes its own.
+- `unstamp()` returns the payload without the envelope, so a handler cannot
+  spread it into an entity, a response, or the next event.
+
 ## 2.2.0
 
 Ambient values that the context should not own.

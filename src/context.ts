@@ -26,6 +26,7 @@ import {
   mergeMissing,
   refuseImmutable,
 } from "./mdc";
+import { Redactor, type RedactOptions } from "./redact";
 
 export interface Store {
   bindings: Bindings;
@@ -40,6 +41,8 @@ export interface SpawnTrailOptions {
   defaults?: Bindings;
   /** Key a snapshot travels under when crossing a boundary. Default `ENVELOPE_KEY`. */
   envelopeKey?: string;
+  /** Paths this instance never publishes. Equivalent to calling `redact()` once. */
+  redact?: RedactOptions;
 }
 
 // Minimal structural types, so spawntrail depends on no framework or logger package.
@@ -124,12 +127,14 @@ export class SpawnTrail {
   private readonly idFactory: () => string;
   private readonly contributors: Contributor[] = [];
   private readonly envelopeKey: string;
+  private readonly policy = new Redactor();
   private base: Bindings;
 
   constructor(options: SpawnTrailOptions = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
     this.envelopeKey = options.envelopeKey ?? ENVELOPE_KEY;
+    if (options.redact) this.policy.add(options.redact);
     // Not a spread: object spread copies `__proto__` from a JSON-parsed object
     // as an OWN property, which would put the store outside its own invariant
     // before a single call was made. Merging into an empty object applies the
@@ -166,10 +171,15 @@ export class SpawnTrail {
    *
    * Note that this is a snapshot, not a live handle: something that grabs it at
    * scope start and reads it later sees the context as it was.
+   *
+   * This is the PUBLISHED view, so a redaction policy applies to it. Asking for
+   * the whole context is the shape of a thing about to be attached to a log line
+   * or an error report; naming a path with `get()` is a deliberate read of a
+   * value the application put there itself, and stays raw.
    */
   bindings(): Bindings {
-    const out = clone(this.target());
-    this.contribute(out);
+    const out = clone(this.published());
+    this.contribute(out, true);
     return out;
   }
 
@@ -182,6 +192,19 @@ export class SpawnTrail {
   private target(): Bindings {
     const store = this.als.getStore();
     return store ? store.bindings : this.base;
+  }
+
+  /**
+   * The store as this instance is willing to publish it.
+   *
+   * With no policy this IS the store, and with one it is a copy along the
+   * matched paths whose untouched branches are still the store's own nodes. It
+   * is therefore exactly as shared as `target()` and carries the same rule:
+   * every caller copies before handing anything out. There are four of them, and
+   * a fifth must do the same.
+   */
+  private published(): Bindings {
+    return this.policy.apply(this.target());
   }
 
   /**
@@ -231,6 +254,11 @@ export class SpawnTrail {
    * own node, which made `trail.get("user").role = "admin"` a way to change the
    * context without going through `put()` at all, so the write-once rule above
    * would have been false from the first line of code that tried it.
+   *
+   * A named path is RAW even under a redaction policy. Redaction is about what
+   * is published, not about what is stored: the application put that email there
+   * and may legitimately need it, and a mask that reached back into the store
+   * would turn a logging policy into data loss.
    */
   get(path?: string): unknown {
     if (path === undefined) return this.bindings();
@@ -239,7 +267,7 @@ export class SpawnTrail {
     if (this.contributors.length === 0) return undefined;
     // Only on a miss, so a contributor costs nothing on the common read.
     const contributed = emptyBindings();
-    this.contribute(contributed);
+    this.contribute(contributed, false);
     return clone(getPath(contributed, path));
   }
 
@@ -310,8 +338,48 @@ export class SpawnTrail {
     return this;
   }
 
-  /** Fill `into` from every contributor, in registration order, without overwriting. */
-  private contribute(into: Record<string, unknown>): void {
+  /**
+   * Declare paths this instance never publishes.
+   *
+   * ```ts
+   * trail.redact({ paths: ["authorization", "*.token"], remove: true });
+   * trail.redact({ paths: ["user.email"], censor: (v) => String(v).replace(/^[^@]+/, "***") });
+   * ```
+   *
+   * The policy applies to what THIS PACKAGE puts on a record: the context and
+   * whatever the contributors report. It is deliberately not a redaction layer
+   * for your logger. A field the call site passed to `logger.info` was a
+   * decision somebody made at that line, and `bind()` cannot see those fields at
+   * all, so claiming to cover them would mean covering a different amount
+   * depending on which integration you picked. Use `pino`'s own `redact` for
+   * the call sites. What this covers is the part nobody decides per line, which
+   * is the part this package created the exposure for.
+   *
+   * `*` matches exactly one segment, an object key or an array index.
+   *
+   * The policy only grows. Calling this again adds paths, and a path already
+   * declared keeps the rule it was declared with; a conflicting second
+   * declaration is reported through `setViolationHandler`. A policy that could
+   * be narrowed at runtime is one that any later line of code could turn off,
+   * and "when was this switched off" is not a question a compliance review
+   * should have to ask of a log pipeline.
+   *
+   * Redaction never touches the store: `get("user.email")` still returns the
+   * email. See the note there for why.
+   */
+  redact(options: RedactOptions): this {
+    this.policy.add(options);
+    return this;
+  }
+
+  /**
+   * Fill `into` from every contributor, in registration order, without overwriting.
+   *
+   * `redact` says whether this is a publish. Contributed values are subject to
+   * the same policy as stored ones, because a leak does not care where the value
+   * was computed; the raw form exists for the one caller that is a named read.
+   */
+  private contribute(into: Record<string, unknown>, redact: boolean): void {
     for (const contributor of this.contributors) {
       let extra: Bindings | undefined;
       try {
@@ -319,7 +387,7 @@ export class SpawnTrail {
       } catch {
         continue;
       }
-      if (extra) mergeMissing(into, extra);
+      if (extra) mergeMissing(into, redact ? this.policy.apply(extra) : extra);
     }
   }
 
@@ -379,10 +447,20 @@ export class SpawnTrail {
    * The capture is the JSON-safe projection, so an Error or a pooled client in
    * the context is dropped rather than travelling as `{}`. Each drop is reported
    * through `setViolationHandler` with reason `"not-serializable"`.
+   *
+   * A redaction policy applies here, because a queue is a publish. RFC-006
+   * proposed the opposite, letting the raw value travel so the consumer could
+   * apply its own policy, and that is wrong for the reason the redaction feature
+   * exists at all: a broker is a system with its own retention window and its
+   * own access list, and a token sitting in a topic for a week is the leak, not
+   * a step towards one. It also fails open, because the consumer may be a
+   * different service on a different version with no policy configured. What the
+   * far side legitimately needs to DO its work belongs in the payload; the
+   * context is what gets logged.
    */
   snapshot(): Snapshot | undefined {
     if (!this.inScope()) return undefined;
-    return { v: 1, bindings: jsonSafe(this.target()) };
+    return { v: 1, bindings: jsonSafe(this.published()) };
   }
 
   /**
@@ -455,8 +533,8 @@ export class SpawnTrail {
     const scope = this;
     return {
       transform(info: Record<string, unknown>): Record<string, unknown> {
-        mergeMissing(info, scope.target());
-        scope.contribute(info);
+        mergeMissing(info, scope.published());
+        scope.contribute(info, true);
         return info;
       },
     };
@@ -473,8 +551,8 @@ export class SpawnTrail {
    */
   pino(): () => Bindings {
     return () => {
-      const out = clone(this.target());
-      this.contribute(out);
+      const out = clone(this.published());
+      this.contribute(out, true);
       return out;
     };
   }
@@ -494,8 +572,8 @@ export class SpawnTrail {
         if (prop === "child" || typeof prop === "symbol") {
           return Reflect.get(target, prop, receiver);
         }
-        const bindings = clone(scope.target());
-        scope.contribute(bindings);
+        const bindings = clone(scope.published());
+        scope.contribute(bindings, true);
         const child = target.child(bindings);
         const value = Reflect.get(child, prop, child);
         return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(child) : value;

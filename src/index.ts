@@ -19,6 +19,8 @@ export type {
   BoundaryDescriptor,
 } from "./context";
 export { ENVELOPE_KEY } from "./context";
+export { REDACTED } from "./redact";
+export type { RedactOptions, Censor } from "./redact";
 export type { Bindings, ViolationHandler, ViolationReason } from "./mdc";
 export {
   getPath,

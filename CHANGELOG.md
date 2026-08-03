@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.4.0
+
+Redaction. The thing that makes this package useful is also its risk: a field
+put in scope once is stamped onto every line for the rest of the request,
+including lines written by code that never intended to publish it, and the
+fields people naturally put in context are the sensitive ones.
+
+### Added
+
+- **`redact({ paths, censor?, remove? })`**, and the equivalent `redact` option
+  on the constructor. `*` matches exactly one segment, an object key or an array
+  index. Declared paths only: no detector, no heuristic, because guessing
+  produces false negatives that give false comfort and false positives that
+  quietly destroy the data somebody is debugging with.
+- **`REDACTED`** (`"[redacted]"`), the default censor, and the `RedactOptions`
+  and `Censor` types.
+- `"redaction-failed"` as a violation reason.
+
+### How it behaves, and why
+
+- **It masks on the way out and never touches the store.** `get("user.email")`
+  still returns the email, so application code keeps working and a bug in a
+  censor costs a masked log line rather than a lost value. The whole-context
+  reads (`bindings()`, `get()` with no argument) are publishes and are masked;
+  naming a path is a deliberate read and is not.
+- **A queue is a publish**, so `snapshot()` and `stamp()` carry the masked
+  value. A broker has its own retention window and its own access list, and a
+  token sitting in a topic for a week is the leak rather than a step towards
+  one. Leaving it to the consumer would also fail open, since the consumer may
+  be a different service with no policy configured.
+- **It covers what this package injects, and says so.** A field passed at a
+  `logger.info` call site was a decision somebody made at that line, and
+  `bind()` cannot see those fields at all, so covering them would mean covering
+  a different amount depending on which integration you picked. Contributors
+  are covered, because a leak does not care where the value was computed.
+- **The policy only grows.** A path already declared keeps the rule it was
+  declared with, and a conflicting redeclaration is refused and reported. A
+  policy that could be narrowed at runtime is one any later line of code could
+  switch off.
+- **A censor that throws fails closed**, yielding the default censor rather than
+  the value. It is the one place in this package where the safe answer is to
+  lose data. A censor that returns `undefined` drops the key.
+- **It costs what it matches, not what you store.** The walk is driven by the
+  declared paths, so a policy whose paths are absent is free, and a match
+  rebuilds only the spine down to the masked value: about +140 ns for a
+  top-level key, about +400 ns for a three-level path.
+
 ## 2.3.0
 
 Context that survives a queue. `AsyncLocalStorage` follows any async

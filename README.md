@@ -205,6 +205,65 @@ event.
 Contributors do not travel: a process id or a span id describes the side that is
 running, and the consumer computes its own.
 
+### Keeping secrets off the line
+
+The thing that makes this package useful is also its risk. A field put in scope
+once is stamped onto every line for the rest of the request, including lines
+written by code that never intended to publish it, and the fields people
+naturally put in context are the sensitive ones: an email, an authorization
+header, a session token, whatever a `bindings(req)` mapper copied wholesale off
+a request. Logs then ship to a backend with a different retention window and a
+different access list than the database the same data is so carefully protected
+in.
+
+Declare the paths that never get published:
+
+```ts
+trail.redact({ paths: ["authorization", "*.token"], remove: true });
+trail.redact({
+  paths: ["user.email"],
+  censor: (value) => String(value).replace(/^[^@]+/, "***"),
+});
+```
+
+`*` matches exactly one segment, an object key or an array index, so `*.token`
+covers `session.token` and `client.token`, and `cards.*.pan` covers every
+element of a list. There is no recursive wildcard: a policy you can read off the
+page is a policy a reviewer can approve. Declared paths only, with no detector
+and no heuristic, because guessing produces false negatives that give false
+comfort and false positives that quietly destroy the data somebody is debugging
+with.
+
+Four things worth knowing before you rely on it:
+
+- **It masks on the way out and never touches the store.** `get("user.email")`
+  still returns the email, so application code keeps working and a bug in a
+  censor costs a masked log line rather than a lost value. The whole-context
+  reads (`bindings()`, `get()` with no argument) are publishes and are masked;
+  naming a path is a deliberate read and is not.
+- **A queue is a publish.** `snapshot()` and `stamp()` carry the masked value,
+  because a broker is a system with its own retention and its own access list,
+  and a token sitting in a topic for a week is the leak rather than a step
+  towards one. What the far side needs to DO its work belongs in the payload;
+  the context is what gets logged.
+- **It covers what this package injects, and says so.** A field the call site
+  passed to `logger.info` was a decision somebody made at that line, and
+  `bind()` cannot see those fields at all, so claiming to cover them would mean
+  covering a different amount depending on which integration you picked. Use
+  `pino`'s own `redact` for call sites. What this covers is the part nobody
+  decides per line, which is the part this package created the exposure for.
+- **The policy only grows.** Calling `redact()` again adds paths; a path already
+  declared keeps the rule it was declared with, and a conflicting redeclaration
+  is refused and reported. A policy that could be narrowed at runtime is one any
+  later line of code could switch off, and "when was this turned off" is not a
+  question a compliance review should have to ask of a log pipeline.
+
+A censor that throws yields the default `"[redacted]"` and reports
+`reason: "redaction-failed"`. It is the one place in this package where the safe
+answer is to lose data. Contributors are subject to the same policy, and the
+policy is per instance, because two instances legitimately publish to two
+different places.
+
 ### Beyond logging
 
 `bindings()` is an ordinary read, so anything ambient can use it. The highest
@@ -226,6 +285,10 @@ Every `captureException` anywhere in the process now carries the identity of the
 request it happened in, and no call site had to pass it. The same shape works
 for a metrics tagger, an audit log that auto-fills its actor, or anything else
 that wants to know which unit of work it is inside.
+
+`bindings()` is a publish, so a redaction policy applies to it. That is the
+right answer here: an error tracker is exactly the kind of third-party
+destination the policy exists for.
 
 ---
 
@@ -340,6 +403,8 @@ Node 22, one machine, one run, against two contexts: four flat identifiers, and 
 
 **Injection is a copy per log record**, on both integrations. The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy rather than the store, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Roughly a microsecond per line on a nested context, against the two to three a logger already spends serializing it.
 
+**A redaction policy costs what it matches, not what you store.** The walk is driven by the declared paths, so a policy whose paths are absent from the context is free (within measurement noise on both shapes above), and it stays free as the policy grows. A path that does match costs one shallow copy per level of that path, because only the spine down to a masked value is rebuilt and every branch beside it is passed along untouched: about +140 ns for a top-level key on the flat context, about +400 ns for a three-level path on the request-shaped one. Reading a named path with `get()` is unaffected, since nothing is redacted there.
+
 **`bind()` is the expensive path, on purpose.** The proxy calls the wrapped logger's `child()` on every property access, so `log.info(...)` in a loop allocates a child per call, and the real cost depends on how heavy that logger's `child()` is. Prefer `winston()` or `pino()` where they exist; `bind()` buys universality with allocations.
 
 Two behaviors are worth knowing before they surprise you. `put()` called outside any scope writes to the same process-wide bindings `setDefaults()` fills, so the value is visible in every scope opened afterwards; that is intentional for configuration like a service name, and easy to trigger by accident from a call site you thought was inside a request. And `bindings()` is a snapshot, not a live handle: something that grabs it at scope start and reads it later sees the context as it was.
@@ -357,6 +422,7 @@ Context propagation in Node is a crowded space, and most tools solve one slice o
 | CLS with a rich API, inside NestJS | [`nestjs-cls`](https://github.com/Papooch/nestjs-cls) |
 | To log the request/response themselves | [`express-winston`](https://github.com/bithavoc/express-winston), [`morgan`](https://github.com/expressjs/morgan), [`pino-http`](https://github.com/pinojs/pino-http) |
 | Pino, and you will wire the context yourself | `pino` + `AsyncLocalStorage` |
+| Redaction of the fields your own call sites pass | [`pino`](https://getpino.io)'s `redact` (spawntrail masks what IT injects, not your call sites) |
 | Context to survive a queue or a worker process | **spawntrail** (nothing else in this list does) |
 | **MDC (`put`/`get`) auto-injected into winston _or_ pino, framework-agnostic, at log time, zero-dep** | **spawntrail** |
 
@@ -377,7 +443,7 @@ What is left, and what this package is for: real MDC semantics over your own log
 ## API
 
 ```ts
-const scope = new SpawnTrail({ idKey?, idFactory?, defaults? });
+const scope = new SpawnTrail({ idKey?, idFactory?, defaults?, envelopeKey?, redact? });
 
 // context
 scope.run(bindings, fn)   // open a scope (seeded, merged over parent/defaults); returns fn()
@@ -389,6 +455,7 @@ scope.bindings()          // a copy of the full merged context
 scope.id() / ensureId(x)  // read / seed the correlation id
 scope.inScope()           // is a scope open here? (see "When the context is empty")
 scope.use(fn)             // register an ambient source read per record, never stored
+scope.redact(policy)      // declare paths never published; grow-only, never touches the store
 
 // crossing a process boundary
 scope.snapshot()          // serializable capture of this scope, or undefined outside one
@@ -406,8 +473,9 @@ scope.bind(logger)        // wrap any .child() logger (fallback)
 scope.express(options)    // express/connect middleware
 
 // observing refusals
-setViolationHandler(fn)   // called with { reason, key?, path? } on every refusal
+setViolationHandler(fn)   // called with { reason, key?, path?, current?, rejected? } on every refusal
                           // reason: "forbidden-key" | "truncated" | "unreadable" | "invalid-path"
+                          //       | "immutable" | "not-serializable" | "redaction-failed"
 ```
 
 Nested `run()` calls act as **segments**: a child scope inherits the parent context and its own writes do not leak back up.

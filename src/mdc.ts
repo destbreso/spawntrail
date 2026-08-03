@@ -101,7 +101,9 @@ export type ViolationReason =
   /** A key that already held a value was written again with a different one. */
   | "immutable"
   /** A value was left out of a snapshot because it cannot cross a serialization boundary. */
-  | "not-serializable";
+  | "not-serializable"
+  /** A censor function threw, so the value was replaced with the default censor rather than published. */
+  | "redaction-failed";
 
 /**
  * Notified when an operation is refused or a value is substituted.
@@ -133,7 +135,8 @@ export function resetViolationWarning(): void {
   warned = false;
 }
 
-function refuse(
+/** Internal to this package: not re-exported from the entry point. */
+export function refuse(
   reason: ViolationReason,
   key?: string,
   path?: string,
@@ -186,7 +189,8 @@ export function refuseImmutable(path: string, current: unknown, rejected: unknow
  */
 const OWNED = new WeakSet<object>();
 
-function own<T extends object>(v: T): T {
+/** Internal to this package: not re-exported from the entry point. */
+export function own<T extends object>(v: T): T {
   OWNED.add(v);
   return v;
 }
@@ -241,7 +245,7 @@ function toKeys(path: unknown): string[] | undefined {
   return path.split(".");
 }
 
-function hasOwn(obj: object, key: string): boolean {
+export function hasOwn(obj: object, key: string): boolean {
   try {
     return Object.prototype.hasOwnProperty.call(obj, key);
   } catch {
@@ -250,7 +254,7 @@ function hasOwn(obj: object, key: string): boolean {
 }
 
 /** Read one own property without letting an accessor take down the caller. */
-function readOwn(obj: object, key: string): unknown {
+export function readOwn(obj: object, key: string): unknown {
   try {
     return (obj as Record<string, unknown>)[key];
   } catch {
@@ -259,7 +263,7 @@ function readOwn(obj: object, key: string): unknown {
   }
 }
 
-function ownKeys(v: object): string[] {
+export function ownKeys(v: object): string[] {
   try {
     return Object.keys(v);
   } catch {

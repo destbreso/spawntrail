@@ -52,6 +52,7 @@ const REQUIRED_VALUES = [
   "UNREADABLE",
   "jsonSafe",
   "ENVELOPE_KEY",
+  "REDACTED",
 ];
 
 // Read the entry defensively. The shape of `exports` is one of the things under
@@ -111,6 +112,24 @@ for (const [label, mod] of [
   check(`${label}: a handler sees a refused key`, seen.includes("forbidden-key"), `saw ${JSON.stringify(seen)}`);
   check(`${label}: a handler sees a refused change`, seen.includes("immutable"), `saw ${JSON.stringify(seen)}`);
   check(`${label}: no pollution through the published bundle`, {}.x === undefined);
+
+  // Redaction is a security claim, so it gets checked against the artifact that
+  // makes it rather than against the source that describes it.
+  const secret = "sk-live-do-not-log";
+  const guarded = new mod.SpawnTrail({ redact: { paths: ["authorization", "*.token"] } });
+  const published = guarded.run({ requestId: "r" }, () => {
+    guarded.put("authorization", secret);
+    guarded.put("session", { id: "s1", token: secret });
+    return {
+      record: JSON.stringify(guarded.winston().transform({ message: "m" })),
+      wire: JSON.stringify(guarded.stamp({ orderId: "o-1" })),
+      stored: guarded.get("authorization"),
+    };
+  });
+  check(`${label}: a declared path does not reach a log record`, !published.record.includes(secret));
+  check(`${label}: a declared path does not cross a boundary`, !published.wire.includes(secret));
+  check(`${label}: the censor is the published one`, published.record.includes(mod.REDACTED));
+  check(`${label}: the store still holds the value`, published.stored === secret);
 }
 
 // Compile a real consumer against the published types, under the resolution
@@ -138,10 +157,15 @@ try {
     }),
   );
   const consumer = (name) => `
-import { SpawnTrail, setViolationHandler, CLONE_WORK_LIMIT } from ${JSON.stringify(pkg.name)};
+import { SpawnTrail, setViolationHandler, CLONE_WORK_LIMIT, REDACTED } from ${JSON.stringify(pkg.name)};
+import type { RedactOptions, Censor } from ${JSON.stringify(pkg.name)};
 import { otel } from ${JSON.stringify(pkg.name + "/otel")};
 void otel;
-const ${name} = new SpawnTrail({ defaults: { service: "api" } });
+const ${name} = new SpawnTrail({ defaults: { service: "api" }, redact: { paths: ["authorization"] } });
+const censor: Censor = (value, path) => \`\${path}:\${String(value).length}\`;
+const policy: RedactOptions = { paths: ["*.token"], censor, remove: false };
+${name}.redact(policy);
+void REDACTED;
 setViolationHandler((event) => { const reason: string = event.reason; void reason; void event.current; });
 ${name}.use(() => ({ pid: 1 }));
 const snap = ${name}.snapshot();

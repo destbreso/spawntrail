@@ -17,6 +17,9 @@ export type {
   Contributor,
   Snapshot,
   BoundaryDescriptor,
+  ContextPath,
+  ValueAt,
+  ContextSeed,
 } from "./context";
 export { ENVELOPE_KEY } from "./context";
 export { REDACTED } from "./redact";

@@ -54,13 +54,26 @@ export type ContextPath<B> = (keyof B & string) | `${string}.${string}`;
  */
 export type ValueAt<B, P> = P extends keyof B ? B[P] : unknown;
 
+/**
+ * A seed, a set of defaults, or anything else handed over as a whole context.
+ *
+ * `Partial<B>` alone, deliberately not intersected with `Bindings`. The
+ * intersection looked harmless and made every typed instance almost unusable:
+ * an interface has no string index signature, so it is not assignable to
+ * `Record<string, unknown>`, and the moment you declared a shape you could only
+ * ever pass a fresh object literal. A variable of your own declared type, or a
+ * function returning it, which is exactly what an express mapper is, was
+ * refused with a message about a missing index signature.
+ */
+export type ContextSeed<B> = Partial<B>;
+
 export interface SpawnTrailOptions<B = Bindings> {
   /** Key under which the correlation id is stored. Default `"requestId"`. */
   idKey?: string;
   /** Factory for a fresh correlation id. Default `crypto.randomUUID`. */
   idFactory?: () => string;
   /** Process-wide base bindings, present in every scope (e.g. service, stage). */
-  defaults?: Partial<B> & Bindings;
+  defaults?: ContextSeed<B>;
   /** Key a snapshot travels under when crossing a boundary. Default `ENVELOPE_KEY`. */
   envelopeKey?: string;
   /** Paths this instance never publishes. Equivalent to calling `redact()` once. */
@@ -83,7 +96,7 @@ export interface ExpressOptions<B = Bindings> {
   /** Derive the correlation id from the request (wins over `idHeader`). */
   id?: (req: RequestLike) => string | undefined;
   /** Derive extra bindings from the request. */
-  bindings?: (req: RequestLike) => Partial<B> & Bindings;
+  bindings?: (req: RequestLike) => ContextSeed<B>;
   /** Echo the resolved id back on this response header. */
   setResponseHeader?: string;
 }
@@ -216,7 +229,7 @@ export class SpawnTrail<B extends object = Bindings> {
   /** Open a context scope and run `fn` inside it. */
   run<T>(fn: () => T): T;
   /** Open a context scope seeded with `bindings` (merged over any parent scope) and run `fn` inside it. */
-  run<T>(bindings: (Partial<B> & Bindings) | undefined, fn: () => T): T;
+  run<T>(bindings: ContextSeed<B> | undefined, fn: () => T): T;
   run<T>(bindingsOrFn: Bindings | undefined | (() => T), maybeFn?: () => T): T {
     const fn = (typeof bindingsOrFn === "function" ? bindingsOrFn : maybeFn) as () => T;
     const bindings = typeof bindingsOrFn === "function" ? undefined : bindingsOrFn;
@@ -314,7 +327,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * followed by `put("user.role", "admin")` from writing `role` into the
    * application's own `u`.
    */
-  put<P extends ContextPath<B>>(path: P, value: ValueAt<B, P>): this {
+  put<P extends ContextPath<B>>(path: P, value: ValueAt<B, P> | undefined): this {
     return this.write(path, value);
   }
 
@@ -527,7 +540,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * Same rule as `put()`: a default that already has a value keeps it. Use
    * `clear()` outside any scope to start over.
    */
-  setDefaults(bindings: Partial<B> & Bindings): this {
+  setDefaults(bindings: ContextSeed<B>): this {
     this.base = deepMergeKeeping(this.base, bindings);
     return this;
   }
@@ -592,7 +605,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * The envelope is gone from what comes back, so a handler cannot spread it
    * into an entity, a response, or the next event.
    */
-  unstamp<T>(data: T): { snapshot?: Snapshot; payload: T } {
+  unstamp<T>(data: T): { snapshot?: Snapshot | undefined; payload: T } {
     if (!isPlainObject(data) || !Object.prototype.hasOwnProperty.call(data, this.envelopeKey)) {
       return { payload: data };
     }
@@ -620,7 +633,7 @@ export class SpawnTrail<B extends object = Bindings> {
     // Cast, and the reason is the same one that keeps `Snapshot` untyped: this
     // came off a wire, so calling it the declared shape would be a claim about
     // data nobody validated.
-    return this.run(seed as Partial<B> & Bindings, () => {
+    return this.run(seed as ContextSeed<B>, () => {
       // Mints only when nothing came across, which is rules 1 and 3 at once.
       this.ensureId();
       return fn();

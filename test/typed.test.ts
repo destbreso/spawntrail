@@ -106,6 +106,49 @@ describe("a declared shape is a contract with the compiler", () => {
     void neverCalled;
   });
 
+  it("takes a variable of the declared shape, not only a fresh literal", () => {
+    // `Partial<B> & Bindings` looked harmless and made a typed instance almost
+    // unusable: an interface has no string index signature, so it is not
+    // assignable to Record<string, unknown>, and every one of these was refused
+    // with a message about a missing index signature. A function returning the
+    // shape is exactly what an express mapper is.
+    interface Ctx {
+      requestId: string;
+      tenant?: string;
+    }
+    const seed: Ctx = { requestId: "r1", tenant: "acme" };
+    const build = (): Ctx => seed;
+
+    const app = new SpawnTrail<Ctx>({ defaults: seed });
+    app.setDefaults(build());
+    app.express({ bindings: (): Ctx => build() });
+    const inside = app.run(seed, () => app.get("tenant"));
+    expect(inside).toBe("acme");
+  });
+
+  it("takes an undefined value, because put() is documented to ignore one", () => {
+    // `put("userId", req.user?.id)` before authentication resolves is the
+    // example at the top of the README, and against a REQUIRED key the type
+    // refused the very thing the runtime is built to do.
+    interface Ctx {
+      requestId: string;
+    }
+    const app = new SpawnTrail<Ctx>();
+    const maybe: string | undefined = undefined;
+    app.run(() => {
+      app.put("requestId", maybe);
+      expect(app.get("requestId")).toBeUndefined();
+      app.put("requestId", "arrived-later");
+      expect(app.get("requestId")).toBe("arrived-later");
+    });
+
+    const neverCalled = (): void => {
+      // @ts-expect-error -- widening to undefined must not widen to anything else
+      app.put("requestId", 42);
+    };
+    void neverCalled;
+  });
+
   it("does not let the defaults decide the shape", () => {
     // `new SpawnTrail({ defaults: { service: "api" } })` used to infer
     // `B = { service: string }` from the options, turning an open bag into a

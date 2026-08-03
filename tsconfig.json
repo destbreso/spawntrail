@@ -8,6 +8,11 @@
     "declaration": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // On because the types are the product here, and this is the flag that
+    // catches an optional property declared as `key?: string` when the code
+    // actually sets it to `undefined`. Both places that got it wrong were in
+    // published types.
+    "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

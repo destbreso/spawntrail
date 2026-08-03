@@ -115,8 +115,8 @@ export type ViolationReason =
  */
 export type ViolationHandler = (event: {
   reason: ViolationReason;
-  key?: string;
-  path?: string;
+  key?: string | undefined;
+  path?: string | undefined;
   /** For `"immutable"`: the value that stays, and the one that was refused. */
   current?: unknown;
   rejected?: unknown;

@@ -302,6 +302,26 @@ index signature turns `keyof AppCtx` into `string`, so every key type checks and
 every value is `unknown`: the feature is silently off, and it looks like it is
 working.
 
+Export your own instance once and import that instead of the shared `trail`:
+
+```ts
+// context.ts
+export const trail = new SpawnTrail<AppCtx>();
+```
+
+Seeds take a variable of your own type, not just a fresh literal, so an express
+mapper or a factory function works:
+
+```ts
+const seed = (req: Request): AppCtx => ({ requestId: req.id });
+trail.express({ bindings: seed });
+```
+
+And `put` still accepts a value that may be `undefined`, because ignoring one is
+what it is documented to do. `put("userId", req.user?.id)` before authentication
+resolves compiles and sets nothing, even where the shape declares `userId` as
+required.
+
 Four things worth knowing:
 
 - **The default is unchanged.** `new SpawnTrail()` is the open bag it has always

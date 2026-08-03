@@ -183,7 +183,7 @@ try {
   );
   const consumer = (name) => `
 import { SpawnTrail, setViolationHandler, CLONE_WORK_LIMIT, REDACTED } from ${JSON.stringify(pkg.name)};
-import type { RedactOptions, Censor } from ${JSON.stringify(pkg.name)};
+import type { RedactOptions, Censor, ContextPath, ValueAt, ContextSeed } from ${JSON.stringify(pkg.name)};
 import { otel } from ${JSON.stringify(pkg.name + "/otel")};
 void otel;
 const ${name} = new SpawnTrail({ defaults: { service: "api" }, redact: { paths: ["authorization"] } });
@@ -213,6 +213,26 @@ typed${name}.put("actor", 42);
 typed${name}.put("acotr", 1);
 // @ts-expect-error -- and the defaults must not decide the shape
 new SpawnTrail<Ctx${name}>({ defaults: { actor: "alice" } });
+
+// A variable of the declared shape, and a function returning it, which is what
+// an express mapper is. Both were refused while the seed types were
+// intersected with Bindings.
+const seed${name}: Ctx${name} = { requestId: "r" };
+typed${name}.run(seed${name}, () => undefined);
+typed${name}.setDefaults(seed${name});
+typed${name}.express({ bindings: (): Ctx${name} => seed${name} });
+// put() ignores undefined at runtime, so the type has to allow it.
+const maybe${name}: string | undefined = undefined;
+typed${name}.put("requestId", maybe${name});
+
+// The helper types are advertised as exported, so a consumer must be able to
+// build on them. Grepping a .d.ts would not notice if they were not.
+type Path${name} = ContextPath<Ctx${name}>;
+type At${name} = ValueAt<Ctx${name}, "actor">;
+type Seed${name} = ContextSeed<Ctx${name}>;
+const wrapper${name} = <P extends Path${name}>(p: P, v: ValueAt<Ctx${name}, P>): void => void typed${name}.put(p, v);
+wrapper${name}("actor", { userId: "u", companyId: "c" });
+void 0 as unknown as [At${name}, Seed${name}];
 
 // The README's headline example, which did not compile before the format's
 // return type was widened to what it actually is.

@@ -11,10 +11,11 @@ string. This is that, opt in, with the bag still the default.
 
 - **`SpawnTrail<B>`**, generic over the shape of its context and defaulting to
   today's open bag. `put`, `get`, `del`, `run`, `setDefaults`, the `defaults`
-  option and the `express` mapper all check against `B`. `ContextPath<B>` and
-  `ValueAt<B, P>` are exported for anyone building on top.
+  option and the `express` mapper all check against `B`. `ContextPath<B>`,
+  `ValueAt<B, P>` and `ContextSeed<B>` are exported for anyone building on top.
 - **`tsconfig.test.json`**, and `npm run typecheck` now covers `test` and
-  `scripts` as well as `src`.
+  `scripts` as well as `src`. `exactOptionalPropertyTypes` is on, since the
+  types are the product here.
 
 ### How it behaves, and why
 
@@ -53,6 +54,9 @@ string. This is that, opt in, with the bag still the default.
   error under `noImplicitAny`. `censor?: unknown | Censor` collapses to
   `unknown`, so nothing gave the function a contextual type. The fixed
   alternatives are now spelled out.
+- **`unstamp()` and the violation event declared optional properties the code
+  sets to `undefined`**, which is a compile error for anyone with
+  `exactOptionalPropertyTypes` on, and inaccurate for everyone else.
 
 Both of those had been shipping for versions, and neither was caught because
 `tsconfig.json` excluded `test`, so `tsc` had never once looked at the file that

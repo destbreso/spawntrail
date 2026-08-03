@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.4.1
+
+**Upgrade from 2.4.0 if you use `redact()`.** In 2.4.0 the policy could publish
+the value it was installed to hide. Four defects, three of them one cause:
+masking rebuilt the spine down to each matched value and carried every unmatched
+branch across by reference, over the live store.
+
+### Fixed
+
+- **A back-reference published the raw value one level below its own mask.** The
+  partial rebuild left the unmatched branch pointing at the ORIGINAL node, so a
+  plain-object graph that refers back to itself (a tree with parent pointers, a
+  `.lean()` result with a populated back-reference) put `"[redacted]"` and the
+  secret on the same record, on every surface including the wire. Declaring the
+  derived path only moved it a level down, since a cycle supplies another and
+  "declared paths only" has no fixed point there.
+- **A censor was handed the live store node**, so the ordinary way to write one
+  for a subtree path, `(v) => { delete v.pan; return v }`, deleted from the
+  context itself: `get()` returned `undefined` afterwards and nothing was
+  reported. The rule that a bug in a censor costs a masked log line rather than
+  a lost value was exactly inverted.
+- **The spine copies were not charged to the work budget**, so one declared path
+  over a large context turned a bounded one-millisecond log call into eighty
+  milliseconds of blocked event loop, growing linearly and unbounded above, to
+  emit a three-key line.
+- **A path naming something about a container threw out of the log call.**
+  `paths: ["items.length"]` is well typed and `hasOwn(array, "length")` is true,
+  so the write became `arr.length = "[redacted]"`, a `RangeError` raised inside
+  the winston format, the pino mixin and the queue adapter. Whether it fired
+  depended on whether a request happened to make the value an array.
+
+### How it behaves now
+
+- **Masking happens on the copy being published**, not on a view over the store,
+  and it copies nothing itself. That is what makes a back-reference safe: the
+  context keeps `user.account.owner === user` as ONE node, so masking
+  `user.email` masks it by every route to it. It is also why a censor may write
+  into the value it is handed: it is changing that record and nothing else.
+- **A path that names something about a container** rather than a field in it
+  matches nothing.
+- **It costs a copy, and almost nothing for the matching.** `pino()`,
+  `bindings()` and `bind()` were already copying, so ~230 ns becomes ~300 ns on
+  a flat context and ~750 ns becomes ~1.0 µs on a request-shaped one. The
+  winston format pays more, because without a policy it merges into the record
+  without copying the context at all: ~150 ns to ~460 ns, ~690 ns to ~1.6 µs.
+  Whether the policy matches is worth 25 to 100 ns, and it can grow without
+  moving the number.
+
 ## 2.4.0
 
 Redaction. The thing that makes this package useful is also its risk: a field
@@ -42,22 +90,7 @@ fields people naturally put in context are the sensitive ones.
 - **A censor that throws fails closed**, yielding the default censor rather than
   the value. It is the one place in this package where the safe answer is to
   lose data. A censor that returns `undefined` drops the key.
-- **Masking happens on the copy being published**, not on a view over the store.
-  That is what makes a back-reference safe: `user.account.owner === user` is an
-  ordinary shape for a plain-object graph (a `.lean()` result with a populated
-  back-reference, a tree with parent pointers), and the context keeps it, so masking
-  `user.email` masks it at `user.account.owner.email` too, because there is one
-  node and it carries the mask by every route. It is also why a censor may write
-  into the value it is handed: it is changing that record and nothing else.
-- **A path that names something about a container rather than a field in it**,
-  `items.length` on an array, matches nothing rather than throwing.
-- **It costs a copy, and almost nothing for the matching.** `pino()`,
-  `bindings()` and `bind()` were already copying, so ~230 ns becomes ~300 ns on
-  a flat context and ~750 ns becomes ~1.0 µs on a request-shaped one. The
-  winston format pays more, because without a policy it merges into the record
-  without copying the context at all: ~150 ns to ~460 ns, ~690 ns to ~1.6 µs.
-  Whether the policy matches is worth 25 to 100 ns, and it can grow without
-  moving the number.
+Superseded by 2.4.1, which is where this behaves as described above. Use that.
 
 ## 2.3.0
 

@@ -1,5 +1,34 @@
 # Changelog
 
+> Versions 2.1.0, 2.2.0 and 2.3.0 have entries below and were never published to
+> npm: their work went out inside 2.4.0. The published line is 1.0.0, 1.0.1,
+> 1.1.0, 2.0.0, 2.4.0, 2.4.1, 2.5.0, 2.5.1, 2.5.2.
+
+## 2.5.2
+
+Numbers you can reproduce. No runtime change: the code is 2.5.0's.
+
+- **`npm run bench`**, a benchmark script in the repo, run against `dist` rather
+  than `src`. The cost table in the README came from a one-off script that no
+  longer existed, and the figures had drifted into contradicting each other: the
+  table said the pino mixin cost ~1.1 µs per record on a nested context while
+  the redaction section quoted ~750 ns for the same measurement. A number in the
+  documentation that nobody can rerun is a claim, not a measurement.
+- **Every figure in "What it costs" is re-measured**, from a single invocation,
+  as the median of seven warmed loops. The redaction table reuses those exact
+  baselines instead of measuring them again, because at this scale the
+  run-to-run spread is wider than the effect being reported, and taking one
+  measurement twice is how the two numbers disagreed in the first place.
+- **`put()` moved the most**, from ~450 ns for a new key to ~165 ns. Why the old
+  figure was what it was cannot be established, because the script that produced
+  it is gone, which is the entire argument for the one that now lives in the
+  repo. The rest of the table landed within the range you would expect from a
+  different machine.
+- **A redaction policy costs more on the surfaces that were already copying than
+  the old text claimed**, about a third more per record on a nested context
+  rather than nothing measurable. The winston format still pays the most,
+  roughly doubling, since it does not copy at all without a policy.
+
 ## 2.5.1
 
 Documentation. No runtime change: the code is 2.5.0's.
@@ -138,13 +167,12 @@ branch across by reference, over the live store.
   into the value it is handed: it is changing that record and nothing else.
 - **A path that names something about a container** rather than a field in it
   matches nothing.
-- **It costs a copy, and almost nothing for the matching.** `pino()`,
-  `bindings()` and `bind()` were already copying, so ~230 ns becomes ~300 ns on
-  a flat context and ~750 ns becomes ~1.0 µs on a request-shaped one. The
-  winston format pays more, because without a policy it merges into the record
-  without copying the context at all: ~150 ns to ~460 ns, ~690 ns to ~1.6 µs.
-  Whether the policy matches is worth 25 to 100 ns, and it can grow without
-  moving the number.
+- **It costs a copy, and little for the matching.** `pino()`, `bindings()` and
+  `bind()` were already copying and pay only for the walk; the winston format
+  pays for both, because without a policy it merges into the record without
+  copying the context at all. The figures are in the README, measured by
+  `npm run bench` (the ones quoted here originally came from a script that no
+  longer existed and did not agree with that table).
 
 ## 2.4.0
 

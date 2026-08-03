@@ -601,28 +601,38 @@ Refused as a path segment and as a key in any value, because assigning it reassi
 
 ### Copying is bounded by work, not by hope
 
-A copy visits at most `CLONE_WORK_LIMIT` (10,000) properties and array elements and descends at most `CLONE_DEPTH_LIMIT` (32) levels, after which the rest becomes `"[spawntrail: truncated]"` and the handler is notified. A dotted path longer than the depth limit is refused outright. A property that throws when read becomes `"[spawntrail: unreadable]"` rather than an exception out of your log call. Counting work rather than objects is the difference between a bound and a slogan: a two-object context whose second object is a three-million-element array is two objects and a third of a second, paid again on every scope and every record.
+A copy visits at most `CLONE_WORK_LIMIT` (10,000) properties and array elements and descends at most `CLONE_DEPTH_LIMIT` (32) levels, after which the rest becomes `"[spawntrail: truncated]"` and the handler is notified. A dotted path longer than the depth limit is refused outright. A property that throws when read becomes `"[spawntrail: unreadable]"` rather than an exception out of your log call. Counting work rather than objects is the difference between a bound and a slogan: a two-object context whose second object is a three-million-element array is two objects, and copying it takes the better part of a second, paid again on every scope and every record. That figure is the engine's own per-element cost measured under the limit and scaled up, not a plain `map`, which is roughly twenty times faster and would have made the bound look unnecessary.
 
 ---
 
 ## What it costs
 
-Node 22, one machine, one run, against two contexts: four flat identifiers, and a request-shaped one (`{ req: { id, headers, user: { id, org } } }`). The second column is the one to plan around if you keep nested objects in context.
+`npm run bench` in the repo, against `dist`, on Node 22 and an M-series Mac: medians of seven warmed loops of 200,000 iterations. Two contexts, four flat identifiers and a request-shaped one (`{ req: { id, headers, user: { id, org } } }`), with `get()` reading `requestId` and `req.user.id` respectively. The second column is the one to plan around if you keep nested objects in context.
 
 | | flat | request-shaped |
 |---|---|---|
-| `run()`, scope entry | ~270 ns | ~1.1 µs |
-| `get("requestId")` | ~44 ns | ~41 ns |
-| `put()`, new key | ~450 ns | ~450 ns |
-| winston format, per record | ~160 ns | ~940 ns |
-| pino mixin, per record | ~230 ns | ~1.1 µs |
-| `bindings()` | ~250 ns | ~1.1 µs |
+| `run()`, scope entry | ~305 ns | ~855 ns |
+| `get()`, one path | ~55 ns | ~70 ns |
+| `put()`, new key | ~165 ns | ~160 ns |
+| winston format, per record | ~155 ns | ~835 ns |
+| pino mixin, per record | ~290 ns | ~830 ns |
+| `bindings()` | ~295 ns | ~835 ns |
+
+Your machine will differ, and the point of the script is that you can find out rather than trust the table. Run-to-run spread at this scale is wide enough that a figure quoted twice from two separate runs disagrees with itself, so every number here comes from one invocation, and the redaction figures below reuse these exact measurements as their baseline rather than taking them again.
 
 **Opening a scope copies the context.** `run()` deep-merges its seed over the parent bindings and stores the result, which is what makes a child's writes invisible to its parent. The cost tracks the size of the context you keep, so a context of a few identifiers is nothing and a context holding a request object is not. This is the number worth watching, because it is paid once per request plus once per nested segment.
 
 **Injection is a copy per log record**, on both integrations. The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy rather than the store, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Roughly a microsecond per line on a nested context, against the two to three a logger already spends serializing it.
 
-**A redaction policy costs a copy, and almost nothing for the matching.** Masking happens on a copy of the context rather than on a view over the store, so the price is paid by whichever surface was not already making one. `pino()`, `bindings()` and `bind()` were already copying, so they go from ~230 ns to ~300 ns flat and from ~750 ns to ~1.0 µs request-shaped. The winston format pays more, because without a policy it merges into the record without copying the context at all: ~150 ns to ~460 ns flat, ~690 ns to ~1.6 µs request-shaped. Whether the policy actually matches is worth about 25 ns flat and 100 ns request-shaped, and the policy can grow without moving the number, because the walk visits only declared paths. `get()` on a named path is unaffected, since nothing is redacted there.
+**A redaction policy costs a copy, and little for the matching.** Masking happens on a copy of the context rather than on a view over the store, so the price is paid by whichever surface was not already making one.
+
+| per record, with a policy | flat | request-shaped |
+|---|---|---|
+| winston format | ~155 ns to ~500 ns | ~835 ns to ~1.9 µs |
+| pino mixin | ~290 ns to ~390 ns | ~830 ns to ~1.2 µs |
+| `bindings()` | ~295 ns to ~360 ns | ~835 ns to ~1.1 µs |
+
+The winston format is the one that feels it, because without a policy it merges into the record without copying the context at all, so it pays for the copy and the walk at once. `pino()`, `bindings()` and `bind()` were already copying and pay only for the walk, which is about a third more on a nested context. Whether the policy actually MATCHES is a small part of that: a policy declaring a path that matches nothing costs ~465 ns and ~1.8 µs on the winston format, within a rounding error of one that hits. The walk visits declared paths only, so a policy can grow without moving the number. `get()` on a named path is unaffected, since nothing is redacted there.
 
 The earlier design masked a view over the live store instead and was genuinely cheaper, which is the only argument in its favor. It also republished a back-reference pointing at the unmasked original, handed a censor the store's own node, and escaped the work budget. Correctness at a microsecond beats that.
 

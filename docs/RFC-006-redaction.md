@@ -1,6 +1,6 @@
 # RFC-006: Redaction (keeping secrets out of the lines context writes)
 
-**Status**: shipped in 2.4.0, with three deviations recorded in section 6. General, compliance-driven, and specifically a consequence of what this package makes easy.
+**Status**: shipped in 2.4.0 and corrected in 2.4.1, with three deviations and four defects recorded in section 6. General, compliance-driven, and specifically a consequence of what this package makes easy.
 
 ## 1. The pain
 

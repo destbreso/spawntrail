@@ -1,6 +1,6 @@
 # RFC-005: OpenTelemetry correlation (traceId in every log line)
 
-**Status**: proposed, not started. This is the single largest adoption lever identified in the review, and it is fully general: it belongs to no application's domain.
+**Status**: implemented in 2.2.0, built as the section 2.1 contributors mechanism with OpenTelemetry as its first plugin. One deviation is recorded at the end of section 2.1. This is the single largest adoption lever identified in the review, and it is fully general: it belongs to no application's domain.
 
 ## 1. The pain
 

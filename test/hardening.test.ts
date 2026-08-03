@@ -1,7 +1,6 @@
 import { describe, expect, it, afterEach } from "vitest";
 
 import { SpawnTrail } from "../src/context";
-import type { ChildLogger } from "../src/context";
 import * as pkg from "../src/index";
 import {
   CLONE_DEPTH_LIMIT,
@@ -426,12 +425,12 @@ describe("what the library hands out is a copy, on every path that hands one out
     const logger = {
       child(bindings: Record<string, unknown>) {
         captured = bindings;
-        return { info: () => undefined } as never;
+        return { info: () => undefined };
       },
       info: () => undefined,
     };
     trail.run({ tenant: "acme" }, () => {
-      void trail.bind(logger as unknown as ChildLogger).info;
+      void trail.bind(logger).info;
       captured.tenant = "evil-corp";
       expect(trail.get("tenant")).toBe("acme");
     });

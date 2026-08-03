@@ -19,6 +19,7 @@ export type {
   BoundaryDescriptor,
   ContextPath,
   ValueAt,
+  WritableAt,
   ContextSeed,
 } from "./context";
 export { ENVELOPE_KEY } from "./context";

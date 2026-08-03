@@ -12,7 +12,10 @@ string. This is that, opt in, with the bag still the default.
 - **`SpawnTrail<B>`**, generic over the shape of its context and defaulting to
   today's open bag. `put`, `get`, `del`, `run`, `setDefaults`, the `defaults`
   option and the `express` mapper all check against `B`. `ContextPath<B>`,
-  `ValueAt<B, P>` and `ContextSeed<B>` are exported for anyone building on top.
+  `ValueAt<B, P>`, `WritableAt<B, P>` and `ContextSeed<B>` are exported for
+  anyone building on top: reads take `ValueAt`, writes take `WritableAt`,
+  because a union of keys is a union on the way out and an intersection on the
+  way in.
 - **`tsconfig.test.json`**, and `npm run typecheck` now covers `test` and
   `scripts` as well as `src`. `exactOptionalPropertyTypes` is on, since the
   types are the product here.
@@ -57,6 +60,19 @@ string. This is that, opt in, with the bag still the default.
 - **`unstamp()` and the violation event declared optional properties the code
   sets to `undefined`**, which is a compile error for anyone with
   `exactOptionalPropertyTypes` on, and inaccurate for everyone else.
+- **`bind()` could not be called with a real logger.** `ChildLogger` carried
+  `[key: string]: unknown`, and neither `winston.Logger` nor `pino.Logger` has a
+  string index signature, so both were refused with "Index signature for type
+  'string' is missing". The universal fallback was the one integration that did
+  not typecheck, from 1.0.0 onward, and this repo's tests hid it by casting.
+- **The minimum TypeScript is 5.3 and is now verified.** The first cut of the
+  typed context used `NoInfer`, which TypeScript only added in 5.4, and it
+  landed in the published declarations: every consumer below that version got
+  `TS2304: Cannot find name 'NoInfer'` from inside `node_modules`. It is
+  spelled out locally instead. `verify-package` could not have caught this and
+  now can: it compiles the consumers a second time on the oldest supported
+  compiler with `skipLibCheck` off, which is the only configuration that reads
+  the file under test.
 
 Both of those had been shipping for versions, and neither was caught because
 `tsconfig.json` excluded `test`, so `tsc` had never once looked at the file that

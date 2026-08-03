@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { SpawnTrail, trail } from "../src/index";
-import type { Bindings } from "../src/index";
+import type { Bindings, ContextPath, ValueAt, WritableAt } from "../src/index";
 
 /**
  * A type-level feature needs type-level tests, so most of the assertions here
@@ -226,6 +226,99 @@ describe("what is deliberately NOT typed, and why", () => {
       const bindings: Bindings | undefined = snapshot?.bindings;
       expect(bindings?.requestId).toBe("r1");
     });
+  });
+});
+
+describe("the error message on the mistake this feature exists to catch", () => {
+  it("keeps the inlined union in put/get/del identical to ContextPath", () => {
+    // `put`, `get` and `del` spell the union out rather than referring to the
+    // alias, so that a typo prints the keys the developer meant instead of the
+    // opaque `ContextPath<AppCtx>`. Nothing but this would notice the two
+    // drifting apart, and a drifted alias would silently stop describing the
+    // signatures it documents.
+    type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2 ? true : false;
+    const pinned: Eq<ContextPath<AppCtx>, (keyof AppCtx & string) | `${string}.${string}`> = true;
+    const forTheBag: Eq<ContextPath<Bindings>, string> = true;
+    expect([pinned, forTheBag]).toEqual([true, true]);
+  });
+});
+
+describe("reading and writing a key are not the same type", () => {
+  it("makes a union key require a value valid for every member", () => {
+    // `put` used to take `ValueAt`, the READ type, so with a union key it
+    // accepted a value valid for only one member. TypeScript refuses the
+    // equivalent `context[key] = 42` on its own: `Type '42' is not assignable
+    // to type 'never'`. Reads stay a union, writes are an intersection.
+    interface Ctx {
+      requestId?: string;
+      attempt?: number;
+    }
+    const app = new SpawnTrail<Ctx>();
+    // A parameter, not a `const` with an initializer: TypeScript narrows the
+    // latter straight back to the literal, and the test would prove nothing.
+    const read = (key: "requestId" | "attempt"): string | number | undefined => app.get(key);
+    app.run(() => {
+      app.put("attempt", 1);
+      expect(read("attempt")).toBe(1);
+    });
+
+    const neverCalled = (key: "requestId" | "attempt"): void => {
+      // @ts-expect-error -- valid for "attempt" only
+      app.put(key, 42);
+      // @ts-expect-error -- valid for "requestId" only
+      app.put(key, "hello");
+    };
+    void neverCalled;
+  });
+
+  it("gives a generic helper one type for each direction", () => {
+    // The pair a wrapper author needs, and the reason there are two of them.
+    const write = <B extends object, P extends ContextPath<B>>(
+      t: SpawnTrail<B>,
+      p: P,
+      v: WritableAt<B, P>,
+    ): void => void t.put(p, v);
+    const read = <B extends object, P extends ContextPath<B>>(
+      t: SpawnTrail<B>,
+      p: P,
+    ): ValueAt<B, P> | undefined => t.get(p);
+
+    interface Ctx {
+      actor?: { userId: string };
+    }
+    const app = new SpawnTrail<Ctx>();
+    app.run(() => {
+      write(app, "actor", { userId: "u1" });
+      expect(read(app, "actor")?.userId).toBe("u1");
+    });
+  });
+});
+
+describe("bind() takes a real logger", () => {
+  it("compiles against winston.Logger and pino.Logger, which it never did before", async () => {
+    // `ChildLogger` carried `[key: string]: unknown` to describe the arbitrary
+    // methods the proxy forwards, and the effect was that neither real logger
+    // satisfied it: "Index signature for type 'string' is missing in type
+    // 'Logger'". The universal fallback was the one integration that did not
+    // typecheck, since 1.0.0, and the tests in this repo hid it by casting.
+    // This case exists to be COMPILED; tsc is what asserts it.
+    const trail = new SpawnTrail();
+    const neverCalled = async (): Promise<void> => {
+      const winston = await import("winston");
+      const pino = (await import("pino")).default;
+      void trail.bind(winston.createLogger());
+      void trail.bind(pino());
+    };
+    void neverCalled;
+
+    // And it still works at runtime with anything that has child().
+    const seen: Array<Record<string, unknown>> = [];
+    const logger = {
+      child: (b: Record<string, unknown>) => (seen.push(b), { info: () => undefined }),
+      info: () => undefined,
+    };
+    trail.run({ requestId: "r1" }, () => void trail.bind(logger).info);
+    expect(seen[0]).toEqual({ requestId: "r1" });
   });
 });
 

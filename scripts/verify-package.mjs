@@ -28,6 +28,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 
+/** The oldest compiler a consumer may be on, pinned as a devDependency and checked below. */
+const OLDEST_TS = "typescript-5-3";
+const OLDEST_TS_VERSION = "5.3";
+
 const failures = [];
 const check = (name, condition, detail = "") => {
   if (condition) return;
@@ -183,7 +187,7 @@ try {
   );
   const consumer = (name) => `
 import { SpawnTrail, setViolationHandler, CLONE_WORK_LIMIT, REDACTED } from ${JSON.stringify(pkg.name)};
-import type { RedactOptions, Censor, ContextPath, ValueAt, ContextSeed } from ${JSON.stringify(pkg.name)};
+import type { RedactOptions, Censor, ContextPath, ValueAt, WritableAt, ContextSeed } from ${JSON.stringify(pkg.name)};
 import { otel } from ${JSON.stringify(pkg.name + "/otel")};
 void otel;
 const ${name} = new SpawnTrail({ defaults: { service: "api" }, redact: { paths: ["authorization"] } });
@@ -230,7 +234,9 @@ typed${name}.put("requestId", maybe${name});
 type Path${name} = ContextPath<Ctx${name}>;
 type At${name} = ValueAt<Ctx${name}, "actor">;
 type Seed${name} = ContextSeed<Ctx${name}>;
-const wrapper${name} = <P extends Path${name}>(p: P, v: ValueAt<Ctx${name}, P>): void => void typed${name}.put(p, v);
+const wrapper${name} = <P extends Path${name}>(p: P, v: WritableAt<Ctx${name}, P>): void => void typed${name}.put(p, v);
+const reader${name} = <P extends Path${name}>(p: P): ValueAt<Ctx${name}, P> | undefined => typed${name}.get(p);
+void reader${name};
 wrapper${name}("actor", { userId: "u", companyId: "c" });
 void 0 as unknown as [At${name}, Seed${name}];
 
@@ -241,6 +247,54 @@ void combined${name};
 `;
   writeFileSync(join(sandbox, "esm.mts"), consumer("esm"));
   writeFileSync(join(sandbox, "cjs.cts"), consumer("cjs"));
+
+  /**
+   * Compile the consumers with one compiler.
+   *
+   * `label` names which, because the second pass is the whole point: this script
+   * was already asking "does the published declaration file compile for a
+   * consumer" and was configured in the two ways that made it unable to notice
+   * when the answer became no. It ran the repo's OWN TypeScript, which is always
+   * the newest one, and it wrote `skipLibCheck: true`, which skips the very file
+   * under test. A minor release then shipped `NoInfer` into the rollup, a type
+   * TypeScript only added in 5.4, and every consumer below that version got
+   * `TS2304: Cannot find name 'NoInfer'` from inside node_modules while this
+   * script stayed green.
+   */
+  const compile = (label, compiler, skipLibCheck) => {
+    writeFileSync(
+      join(sandbox, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          module: "node16",
+          moduleResolution: "node16",
+          target: "es2022",
+          strict: true,
+          noEmit: true,
+          skipLibCheck,
+          types: [],
+        },
+        files: ["esm.mts", "cjs.cts"],
+      }),
+    );
+    try {
+      execFileSync(process.execPath, [compiler, "-p", sandbox], { stdio: "pipe" });
+      return true;
+    } catch (error) {
+      const output = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim();
+      check(label, false, output.split("\n").slice(0, 6).join(" | "));
+      return false;
+    }
+  };
+
+  const oldest = resolve(root, `node_modules/${OLDEST_TS}/lib/tsc.js`);
+  compile(
+    `an ESM and a CommonJS consumer compile on TypeScript ${OLDEST_TS_VERSION}, the declared floor, ` +
+      "with skipLibCheck off so the published declarations are actually checked",
+    oldest,
+    false,
+  );
+
   try {
     execFileSync(process.execPath, [resolve(root, "node_modules/typescript/lib/tsc.js"), "-p", sandbox], {
       stdio: "pipe",

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { REDACTED, SpawnTrail, setViolationHandler } from "../src/index";
-import type { ChildLogger, ViolationReason } from "../src/index";
+import type { ViolationReason } from "../src/index";
 
 /**
  * The feature exists because of what makes the package useful: a field put in
@@ -38,8 +38,8 @@ describe("a declared path never reaches a log record", () => {
       expect(trail.bindings()).toMatchObject({ authorization: REDACTED, user: { id: 7, email: REDACTED } });
 
       const seen: Array<Record<string, unknown>> = [];
-      const logger = { child: (b: Record<string, unknown>) => (seen.push(b), { info: () => undefined }) };
-      void trail.bind(logger as unknown as ChildLogger).info;
+      const logger = { child: (b: Record<string, unknown>) => (seen.push(b), { info: () => undefined }), info: () => undefined };
+      void trail.bind(logger).info;
       expect(seen[0]).toMatchObject({ authorization: REDACTED, user: { email: REDACTED } });
     });
   });

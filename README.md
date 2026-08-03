@@ -39,7 +39,7 @@ Two decisions shape everything below. The context is injected **at log time**, t
 npm install spawntrail
 ```
 
-Node >= 16. No runtime dependencies: it uses `node:async_hooks` and `node:crypto`. `winston`, `pino` and `express` are yours to bring, and spawntrail does not depend on any of them; each is reached through a small structural interface (`{ transform(info) }`, a mixin function, `{ headers }`), so nothing is pinned to a version of theirs.
+Node >= 16, and TypeScript >= 5.3 if you use it, which every release verifies by compiling a consumer against the published declarations on that exact compiler. No runtime dependencies: it uses `node:async_hooks` and `node:crypto`. `winston`, `pino` and `express` are yours to bring, and spawntrail does not depend on any of them; each is reached through a small structural interface (`{ transform(info) }`, a mixin function, `{ headers }`), so nothing is pinned to a version of theirs.
 
 ---
 
@@ -337,6 +337,23 @@ Four things worth knowing:
   library holding the untyped type. That interop is deliberate rather than a
   leak: your logging layer should not break the moment a dependency logs
   through it.
+- **Writing a helper generic over the shape?** Spell the value with the types
+  the package exports, not with an indexed access: TypeScript will not simplify
+  `B[K]` into a deferred conditional, so a wrapper written that way does not
+  compile. Reads take `ValueAt`, writes take `WritableAt`, and they differ for a
+  reason: reading a union of keys may give you either type, while writing one
+  has to be a value valid for all of them.
+
+  ```ts
+  const set = <B extends object, P extends ContextPath<B>>(
+    t: SpawnTrail<B>, p: P, v: WritableAt<B, P>,
+  ) => t.put(p, v);
+
+  const read = <B extends object, P extends ContextPath<B>>(
+    t: SpawnTrail<B>, p: P,
+  ): ValueAt<B, P> | undefined => t.get(p);
+  ```
+
 - **`bindings()` and `snapshot()` are deliberately NOT typed as your shape.**
   Contributors add keys the shape never mentioned, a redaction policy replaces a
   declared object with a censor string, and a snapshot arrives off a wire that

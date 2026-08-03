@@ -41,6 +41,15 @@ export interface Store {
  * `put("acotr", x)` a compile error while `put("actor.email", x)` stays open.
  * A dot is the only thing that distinguishes "a path into a value" from "a
  * top-level key I forgot to declare", so it is what the type keys on.
+ *
+ * `put`, `get` and `del` spell this union out instead of referring to the alias,
+ * and must be kept in step with it. The reason is the error message on the one
+ * mistake this feature exists to catch: behind the alias, a typo reads
+ * `Argument of type '"acotr"' is not assignable to parameter of type
+ * 'ContextPath<AppCtx>'`, which names nothing the developer can act on. Inlined,
+ * the same compiler prints the union, so the message lists the keys they meant.
+ * A test pins the two forms as identical, because nothing else would notice them
+ * drifting apart.
  */
 export type ContextPath<B> = (keyof B & string) | `${string}.${string}`;
 
@@ -55,6 +64,29 @@ export type ContextPath<B> = (keyof B & string) | `${string}.${string}`;
 export type ValueAt<B, P> = P extends keyof B ? B[P] : unknown;
 
 /**
+ * What may be WRITTEN at `P`. The read-position twin of {@link ValueAt}.
+ *
+ * The two differ only when `P` is a union of keys, and there they must: reading
+ * `"requestId" | "attempt"` may give you either type, so a union is right on the
+ * way out, while writing it has to be a value valid for BOTH, which is an
+ * intersection. Using `ValueAt` in the parameter let `put(key, 42)` through for
+ * a union key where only one member is a number, and TypeScript refuses the
+ * equivalent `context[key] = 42` on its own with `Type '42' is not assignable to
+ * type 'never'`.
+ *
+ * The intersection comes from inferring through a contravariant position, which
+ * is the standard way to turn a distributed union into an intersection.
+ *
+ * If you are writing a helper generic over the shape, this is the type to spell
+ * the value with: reads take `ValueAt`, writes take `WritableAt`.
+ */
+export type WritableAt<B, P> = (P extends keyof B ? (v: B[P]) => void : (v: unknown) => void) extends (
+  v: infer I,
+) => void
+  ? I
+  : never;
+
+/**
  * A seed, a set of defaults, or anything else handed over as a whole context.
  *
  * `Partial<B>` alone, deliberately not intersected with `Bindings`. The
@@ -66,6 +98,23 @@ export type ValueAt<B, P> = P extends keyof B ? B[P] : unknown;
  * refused with a message about a missing index signature.
  */
 export type ContextSeed<B> = Partial<B>;
+
+/**
+ * Blocks inference of a type parameter from one argument position.
+ *
+ * Spelled out here rather than using the `NoInfer` that TypeScript 5.4 added to
+ * its standard library, because a type alias in a published `.d.ts` is compiled
+ * by the CONSUMER's compiler, not by this package's. Using the built-in one put
+ * `SpawnTrailOptions<NoInfer<B>>` into the shipped declarations and every
+ * consumer on 5.3 or older got `error TS2304: Cannot find name 'NoInfer'`, from
+ * inside `node_modules`, with nothing in the package declaring a floor. That is
+ * a minor release quietly raising the minimum compiler, which is the kind of
+ * break a lockfile does not protect anyone from.
+ *
+ * The indexed-access form is the long-standing idiom and works on every version
+ * this package supports.
+ */
+type NoInferShape<T> = [T][T extends unknown ? 0 : never];
 
 export interface SpawnTrailOptions<B = Bindings> {
   /** Key under which the correlation id is stored. Default `"requestId"`. */
@@ -116,10 +165,24 @@ export interface WinstonFormatLike {
   transform<T extends Record<string, unknown>>(info: T): T & Bindings;
 }
 
-/** Any logger exposing a `child(bindings) => logger` method (winston, pino, bunyan). */
+/**
+ * Any logger exposing a `child(bindings) => logger` method (winston, pino, bunyan).
+ *
+ * One method and nothing else. This used to carry `[key: string]: unknown` as
+ * well, to describe the arbitrary log methods the proxy forwards, and the effect
+ * was that `bind()` could not be called with any real logger at all: neither
+ * `winston.Logger` nor `pino.Logger` has a string index signature, so both were
+ * refused with "Index signature for type 'string' is missing". The universal
+ * fallback was the one integration that did not typecheck, from 1.0.0 onward,
+ * and the repo's own tests hid it by casting.
+ *
+ * The child is typed `object` rather than `ChildLogger` because that is all the
+ * proxy needs of it (`Reflect.get` takes an object) and it is all a logger
+ * promises: pino's `child()` returns a different generic instantiation of
+ * itself, which a self-referential return type rejects.
+ */
 export interface ChildLogger {
-  child(bindings: Bindings): ChildLogger;
-  [key: string]: unknown;
+  child(bindings: Bindings): object;
 }
 
 /**
@@ -207,14 +270,14 @@ export class SpawnTrail<B extends object = Bindings> {
   private base: Bindings;
 
   /**
-   * `NoInfer` because otherwise `defaults` decides the shape.
+   * Inference blocked, because otherwise `defaults` decides the shape.
    *
    * `new SpawnTrail({ defaults: { service: "api" } })` would infer
    * `B = { service: string }`, quietly turning an open bag into a one-key
    * contract that then rejects `put("requestId", id)` on the next line. The
    * shape comes from the type argument or not at all.
    */
-  constructor(options: SpawnTrailOptions<NoInfer<B>> = {}) {
+  constructor(options: SpawnTrailOptions<NoInferShape<B>> = {}) {
     this.idKey = options.idKey ?? "requestId";
     this.idFactory = options.idFactory ?? randomUUID;
     this.envelopeKey = options.envelopeKey ?? ENVELOPE_KEY;
@@ -327,7 +390,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * followed by `put("user.role", "admin")` from writing `role` into the
    * application's own `u`.
    */
-  put<P extends ContextPath<B>>(path: P, value: ValueAt<B, P> | undefined): this {
+  put<P extends (keyof B & string) | `${string}.${string}`>(path: P, value: WritableAt<B, P> | undefined): this {
     return this.write(path, value);
   }
 
@@ -364,7 +427,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * would turn a logging policy into data loss.
    */
   get(): Bindings;
-  get<P extends ContextPath<B>>(path: P): ValueAt<B, P> | undefined;
+  get<P extends (keyof B & string) | `${string}.${string}`>(path: P): ValueAt<B, P> | undefined;
   get(path?: string): unknown {
     if (path === undefined) return this.bindings();
     const stored = getPath(this.target(), path);
@@ -383,7 +446,7 @@ export class SpawnTrail<B extends object = Bindings> {
    * `put()` is: deleting and setting again would be the write-once rule with a
    * door in the back of it. Removing a key that was never set is a no-op.
    */
-  del(path: ContextPath<B>): this {
+  del(path: (keyof B & string) | `${string}.${string}`): this {
     const current = getPath(this.target(), path);
     if (current !== undefined) {
       refuseImmutable(path, current, undefined);

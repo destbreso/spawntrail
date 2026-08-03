@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Writable } from "node:stream";
 import winston from "winston";
 import pino from "pino";
-import { SpawnTrail, type ChildLogger } from "../src/index";
+import { SpawnTrail } from "../src/index";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -81,10 +81,10 @@ describe("bind() fallback", () => {
         return {
           ...fake,
           info: (msg: string) => calls.push({ msg, ...bindings }),
-        } as unknown as ChildLogger;
+        };
       },
       info: (msg: string) => calls.push({ msg }),
-    } as unknown as ChildLogger;
+    };
 
     const bound = s.bind(fake);
     s.run({ requestId: "b1" }, () => {

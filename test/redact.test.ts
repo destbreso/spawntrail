@@ -101,11 +101,6 @@ describe("what is stored is untouched, which is the whole split", () => {
   });
 
   it("does not hand out the store's own node for a branch it did not touch", () => {
-    // The load-bearing one. A match rebuilds only the spine down to the masked
-    // value, so the view SHARES the sibling `c` with the live store by
-    // reference. That is safe for exactly one reason: every published surface
-    // copies before it hands anything out. If a fifth one is ever added and
-    // forgets, this is the test that says so.
     const trail = new SpawnTrail({ redact: { paths: ["a.b"] } });
     trail.run(() => {
       trail.put("a", { b: "secret", c: { d: 1 } });
@@ -151,6 +146,148 @@ describe("what is stored is untouched, which is the whole split", () => {
       expect(first.user).not.toBe(second.user);
       expect(first).toEqual(second);
     });
+  });
+});
+
+describe("the four ways the first implementation of this leaked", () => {
+  /**
+   * Each of these is a real defect that shipped in the first draft of the
+   * redaction walk and was found by pointing four adversarial readers at it.
+   * Three of them had one cause: masking by rebuilding a view over the LIVE
+   * store instead of masking the copy the caller already pays for.
+   */
+
+  it("masks a back-reference too, instead of publishing the raw value under its own mask", () => {
+    // A parent pointer is an ordinary context shape, and `clone()` keeps cycles
+    // on purpose. The partial rebuild left `user.self` pointing at the original
+    // node, so the raw email came out one level below its own mask, on every
+    // surface including the wire. Declaring the derived path just moved the leak
+    // a level down, and a cycle generates infinitely many of those.
+    const trail = new SpawnTrail({ redact: { paths: ["user.email"] } });
+    trail.run({ requestId: "r1" }, () => {
+      const user: Record<string, unknown> = { id: 7, email: "alice@example.com" };
+      user.self = user;
+      user.account = { plan: "pro", owner: user };
+      trail.put("user", user);
+
+      for (const out of [trail.pino()(), trail.bindings(), trail.winston().transform({ message: "m" })]) {
+        const seen = out.user as Record<string, Record<string, Record<string, unknown>>>;
+        expect(seen.email).toBe(REDACTED);
+        expect(seen.self!.email).toBe(REDACTED);
+        expect(seen.account!.owner!.email).toBe(REDACTED);
+      }
+      expect(JSON.stringify(trail.stamp({ orderId: "o-1" }))).not.toContain("alice@example.com");
+      // And it is still one node, not a knot untied into two.
+      const published = trail.bindings().user as Record<string, unknown>;
+      expect(published.self).toBe(published);
+    });
+  });
+
+  it("rests on the store holding no aliasing other than a back-edge to an ancestor", () => {
+    // The argument that masking the copy is COMPLETE and not merely better.
+    // `put()` copies every value independently and `clone()` gives two
+    // references to one object two independent copies, so the only aliasing a
+    // context can hold is a back-edge, and a back-edge is exactly what `clone()`
+    // resolves against the copy being built. One node per node means masking it
+    // masks every route to it. If this ever stops being true, the completeness
+    // argument goes with it and the test above starts passing for luck.
+    const trail = new SpawnTrail();
+    trail.run(() => {
+      const shared = { pan: "4111" };
+      trail.put("a", { left: shared, right: shared });
+      trail.put("b", shared);
+      trail.put("c", shared);
+      const a = trail.get("a") as Record<string, unknown>;
+      expect(a.left).not.toBe(a.right);
+      expect(trail.get("b")).not.toBe(trail.get("c"));
+
+      const node: Record<string, unknown> = { id: 1 };
+      node.self = node;
+      trail.put("e", node);
+      const stored = trail.get("e") as Record<string, unknown>;
+      expect(stored.self).toBe(stored);
+    });
+  });
+
+  it("hands the censor a value out of the copy, so it cannot rewrite the context", () => {
+    // `(v) => { delete v.pan; return v }` is the first thing anyone writes for a
+    // subtree-level path. Against the live store it deleted from the context
+    // itself, turning "a bug in a censor costs a masked log line rather than a
+    // lost value" into its exact opposite.
+    const trail = new SpawnTrail({
+      redact: {
+        paths: ["user"],
+        censor: (value) => {
+          const v = value as Record<string, unknown>;
+          delete v.pan;
+          v.injected = true;
+          return v;
+        },
+      },
+    });
+    trail.run(() => {
+      trail.put("user", { id: 7, pan: "4111111111111111" });
+      expect(trail.winston().transform({ message: "m" }).user).toEqual({ id: 7, injected: true });
+      expect(trail.get("user")).toEqual({ id: 7, pan: "4111111111111111" });
+      expect(trail.get("user.pan")).toBe("4111111111111111");
+      // Nor can a stashed handle write through afterwards.
+      let stashed: Record<string, unknown> | undefined;
+      const sneaky = new SpawnTrail({ redact: { paths: ["s"], censor: (v) => ((stashed = v as never), "x") } });
+      sneaky.run(() => {
+        sneaky.put("s", { token: "legit" });
+        sneaky.pino()();
+        stashed!.token = "attacker";
+        expect(sneaky.get("s.token")).toBe("legit");
+      });
+    });
+  });
+
+  it("stays bounded: a policy cannot make a record cost the size of the context", () => {
+    // The spine copies were not charged to the work budget, so one declared path
+    // over a large context turned a bounded 1 ms log call into 80 ms of blocked
+    // event loop, growing linearly and unbounded above, to emit three keys.
+    const trail = new SpawnTrail({ redact: { paths: ["*.zzz"] } });
+    const plain = new SpawnTrail();
+    const wide: Record<string, unknown> = {};
+    for (let g = 0; g < 20; g += 1) {
+      const node: Record<string, unknown> = { zzz: "secret" };
+      for (let k = 0; k < 5_000; k += 1) node[`k${k}`] = k;
+      wide[`g${g}`] = node;
+    }
+    const cost = (t: SpawnTrail): number =>
+      t.run(() => {
+        for (const [k, v] of Object.entries(wide)) t.put(k, v);
+        const mixin = t.pino();
+        mixin();
+        const started = process.hrtime.bigint();
+        for (let i = 0; i < 3; i += 1) mixin();
+        return Number(process.hrtime.bigint() - started) / 3 / 1e6;
+      });
+
+    const withPolicy = cost(trail);
+    const without = cost(plain);
+    // Not a fixed millisecond budget, which would be flaky on a loaded machine:
+    // the claim is that a policy does not change the ORDER of the cost.
+    expect(withPolicy).toBeLessThan(without * 5 + 5);
+  });
+
+  it("matches nothing for a path that names something about an array, rather than throwing", () => {
+    // `hasOwn(arr, "length")` is true, so the rule fired and `arr.length =
+    // "[redacted]"` threw RangeError straight out of the winston format, the
+    // pino mixin and the queue adapter. The policy is well typed, and whether it
+    // fired depended on whether a request happened to make the value an array.
+    const seen = reasons();
+    for (const options of [{ paths: ["items.length"] }, { paths: ["items.length"], remove: true }]) {
+      const trail = new SpawnTrail({ redact: options });
+      trail.run(() => {
+        trail.put("items", ["a", "b"]);
+        expect(trail.pino()().items).toEqual(["a", "b"]);
+        expect(trail.winston().transform({ message: "m" }).items).toEqual(["a", "b"]);
+        expect(trail.snapshot()?.bindings.items).toEqual(["a", "b"]);
+        expect(trail.bindings().items).toEqual(["a", "b"]);
+      });
+    }
+    expect(seen).toEqual([]);
   });
 });
 

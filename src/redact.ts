@@ -24,12 +24,29 @@
  * somebody is debugging with. A security feature that lies about its coverage is
  * worse than none.
  *
- * **The walk is driven by the policy, not by the record.** A log line pays for
- * the paths that were declared, not for the size of the context, and a node with
- * nothing matched underneath it is passed through by reference rather than
- * copied. The result therefore shares structure with its input, which is safe
- * for exactly one reason: it is no more shared than the store it came from, and
- * every caller of it already copies before handing anything out.
+ * **It masks a copy, in place, and never copies anything itself.** The first
+ * version of this file rebuilt the spine down to each matched value and carried
+ * every unmatched branch across by reference, which looked like the cheap answer
+ * and was wrong three separate ways. A back-reference in a plain-object graph (a
+ * tree with parent pointers, a `.lean()` result with a populated back-reference)
+ * survived the rebuild pointing at
+ * the ORIGINAL node, so the raw value came out one level below its own mask, on
+ * every surface including the wire, and declaring the derived path just moved the
+ * leak a level down. A censor was handed the live store node, so the ordinary way
+ * to write one (`v => { delete v.pan; return v }`) deleted from the context
+ * itself. And those spine copies were not charged to the work budget, so one
+ * declared path over a large context turned a bounded one-millisecond log call
+ * into eighty milliseconds of blocked event loop.
+ *
+ * Masking the copy the caller already pays for removes all three at once. There
+ * is nothing left to share, the censor cannot reach the store, and the input is
+ * already bounded by `CLONE_WORK_LIMIT`. It is also cheaper than what it
+ * replaces. The reason it is COMPLETE, and not just better, is a property of the
+ * store rather than of this file: `put()` copies every value independently and
+ * `clone()` gives two references to one object two independent copies, so the
+ * only aliasing a context can hold is a back-edge to an ancestor, and a back-edge
+ * is exactly what `clone()` resolves against the copy being built. Mask the copy
+ * and every route to that node sees the mask, because there is only one node.
  */
 import {
   type Bindings,
@@ -54,6 +71,10 @@ export const REDACTED = "[redacted]";
  * Receives the value and the full dot-path it was found at, so one function can
  * serve several paths. Returning `undefined` drops the key, which is `remove`
  * decided per value rather than per path.
+ *
+ * The value comes out of the copy being published, never out of the store, so
+ * `(value) => { delete value.pan; return value }` is a fine way to write one:
+ * it changes that record and nothing else.
  */
 export type Censor = (value: unknown, path: string) => unknown;
 
@@ -172,15 +193,16 @@ export class Redactor {
   }
 
   /**
-   * The publishable view of `source`.
+   * Mask the declared paths in `target`, IN PLACE, and return it.
    *
-   * Returns `source` itself when nothing matched, and otherwise a copy along the
-   * matched paths only. Either way the result is exactly as shared as its input,
-   * so it is safe to hand to something that copies and to nothing else.
+   * `target` must be a copy this package owns and is about to publish, never a
+   * store. Every caller goes through `SpawnTrail.published()`, which is the one
+   * place that decides what gets copied.
    */
-  apply(source: Bindings): Bindings {
-    if (this.declared === 0) return source;
-    return redactContainer(source, [this.root], "", { work: CLONE_WORK_LIMIT }) as Bindings;
+  applyInPlace(target: Bindings): Bindings {
+    if (this.declared === 0) return target;
+    redactContainer(target, [this.root], "", { work: CLONE_WORK_LIMIT }, new Set<object>());
+    return target;
   }
 }
 
@@ -267,105 +289,98 @@ function censorFor(rule: Rule, value: unknown, path: string): unknown {
   }
 }
 
-function redactContainer(source: object, nodes: Node[], path: string, budget: Budget): object {
-  const array = Array.isArray(source);
-  const keys = keysToVisit(source, nodes);
+/**
+ * Whether a key names an element of an array, rather than something about the
+ * array.
+ *
+ * `paths: ["items.length"]` is well typed, reads as a field name, and used to
+ * reach `arr.length = "[redacted]"`, which throws `RangeError` out of the log
+ * call, or `delete arr.length`, which throws `TypeError` under strict mode. The
+ * same policy was harmless while the value was an object and fatal the first
+ * time a request made it an array. An array has exactly one kind of field, and
+ * anything else declared against it matches nothing.
+ */
+function isIndexKey(key: string): boolean {
+  const index = Number(key);
+  return Number.isInteger(index) && index >= 0 && String(index) === key;
+}
 
-  let out = source;
-  const writable = (): Record<string, unknown> => {
-    if (out === source) {
-      out = array ? shallowCopyArray(source as unknown[]) : shallowCopyObject(source as Bindings);
-    }
-    return out as Record<string, unknown>;
-  };
-
-  for (let i = 0; i < keys.length; i += 1) {
-    const key = keys[i] as string;
-    // Never assignable on a plain object, so never redactable either. The store
-    // filters it on the way in; a contributor's own object may still carry it,
-    // and it is dropped by the copy below or refused by the merge downstream.
-    if (isForbiddenKey(key)) continue;
-
-    if (budget.work <= 0) {
-      // Fail closed. A value the policy could not be checked against is not
-      // published, so the rest of this node is dropped rather than passed
-      // through. It fires only on a context node with more than ten thousand
-      // keys, which the copy downstream was going to truncate anyway.
-      refuse("truncated", undefined, path === "" ? undefined : path);
-      const target = writable();
-      for (let j = i; j < keys.length; j += 1) delete target[keys[j] as string];
-      if (!array) target[TRUNCATED] = TRUNCATED;
-      break;
-    }
-    budget.work -= 1;
-
-    const matched = childrenFor(nodes, key);
-    if (matched.length === 0) continue;
-
-    const childPath = path === "" ? key : `${path}.${key}`;
-    const rule = ruleOf(matched);
-    if (rule !== undefined) {
-      const replacement = rule.remove ? undefined : censorFor(rule, readOwn(source, key), childPath);
-      const target = writable();
-      if (replacement === undefined) delete target[key];
-      else target[key] = replacement;
-      continue;
-    }
-
-    const value = readOwn(source, key);
-    // A declared path that runs deeper than the value does matches nothing:
-    // `user.email` says nothing about a `user` that is a string.
-    if (!isContainer(value)) continue;
-    const replaced = redactContainer(value, matched, childPath, budget);
-    if (replaced !== value) writable()[key] = replaced;
+/** Write without letting a frozen or accessor-only target throw out of a log call. */
+function put(target: Record<string, unknown>, key: string, value: unknown, path: string): void {
+  try {
+    target[key] = value;
+  } catch {
+    refuse("unreadable", key, path);
   }
+}
 
-  return out;
+function drop(target: Record<string, unknown>, key: string, path: string): void {
+  try {
+    delete target[key];
+  } catch {
+    refuse("unreadable", key, path);
+  }
 }
 
 /**
- * A one-level copy whose values are still the originals.
- *
- * That sharing is the point: only the spine down to a redacted value is rebuilt.
- * `Object.assign` cannot be used here because it assigns through setters, and
- * this runs over objects a contributor returned, where `__proto__` can be an own
- * property straight out of `JSON.parse`.
- *
- * Deliberately NOT branded into the owned set, unlike every other copy in this
- * package. The brand is what licenses a dot-path walk to descend into an object,
- * and nothing walks this: the view is only ever a source for a merge or a copy,
- * never a store and never a merge target. Not branding it is the conservative
- * direction, and the brand is a `WeakSet` write on every level of every matched
- * path on every log record, which is most of what redaction costs.
+ * @param open the containers on the current descent. A back-edge is not followed
+ * a second time, which both terminates the walk and keeps a censor from running
+ * twice over one node: it is the SAME node, so masking it once masked every
+ * route to it.
  */
-function shallowCopyObject(source: Bindings): Bindings {
-  const out: Bindings = {};
-  for (const key of ownKeys(source)) {
-    if (isForbiddenKey(key)) continue;
-    out[key] = readOwn(source, key);
-  }
-  return out;
-}
+function redactContainer(
+  target: object,
+  nodes: Node[],
+  path: string,
+  budget: Budget,
+  open: Set<object>,
+): void {
+  if (open.has(target)) return;
+  const array = Array.isArray(target);
+  const keys = keysToVisit(target, nodes);
+  const into = target as Record<string, unknown>;
 
-/** The same, by own index keys, so a hole stays a hole rather than becoming an own slot. */
-function shallowCopyArray(source: unknown[]): unknown[] {
-  const out: unknown[] = [];
-  for (const key of ownKeys(source)) {
-    const index = Number(key);
-    if (!Number.isInteger(index) || index < 0) continue;
-    out[index] = readOwn(source, key);
-  }
-  let length = 0;
+  open.add(target);
   try {
-    length = source.length;
-  } catch {
-    // A length that throws leaves the copy as long as what was actually read.
-    return out;
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i] as string;
+      // Never an ordinary property on a plain object, so never redactable either.
+      if (isForbiddenKey(key)) continue;
+      if (array && !isIndexKey(key)) continue;
+
+      if (budget.work <= 0) {
+        // Fail closed. A value the policy could not be checked against does not
+        // get published, so the rest of this node goes rather than passing
+        // through unchecked.
+        refuse("truncated", undefined, path === "" ? undefined : path);
+        for (let j = i; j < keys.length; j += 1) drop(into, keys[j] as string, path);
+        if (!array) put(into, TRUNCATED, TRUNCATED, path);
+        break;
+      }
+      budget.work -= 1;
+
+      const matched = childrenFor(nodes, key);
+      if (matched.length === 0) continue;
+
+      const childPath = path === "" ? key : `${path}.${key}`;
+      const rule = ruleOf(matched);
+      if (rule !== undefined) {
+        // The value handed to a censor comes out of the copy being published, so
+        // a censor that masks or deletes in place changes this record and
+        // nothing else.
+        const replacement = rule.remove ? undefined : censorFor(rule, readOwn(target, key), childPath);
+        if (replacement === undefined) drop(into, key, childPath);
+        else put(into, key, replacement, childPath);
+        continue;
+      }
+
+      const value = readOwn(target, key);
+      // A declared path that runs deeper than the value does matches nothing:
+      // `user.email` says nothing about a `user` that is a string.
+      if (!isContainer(value)) continue;
+      redactContainer(value, matched, childPath, budget, open);
+    }
+  } finally {
+    open.delete(target);
   }
-  try {
-    if (out.length < length) out.length = length;
-  } catch {
-    refuse("truncated");
-  }
-  return out;
 }

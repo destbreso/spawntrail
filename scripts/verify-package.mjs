@@ -21,6 +21,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { inspect } from "node:util";
 import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -116,20 +117,44 @@ for (const [label, mod] of [
   // Redaction is a security claim, so it gets checked against the artifact that
   // makes it rather than against the source that describes it.
   const secret = "sk-live-do-not-log";
-  const guarded = new mod.SpawnTrail({ redact: { paths: ["authorization", "*.token"] } });
+  const guarded = new mod.SpawnTrail({ redact: { paths: ["authorization", "*.token", "user.email"] } });
   const published = guarded.run({ requestId: "r" }, () => {
     guarded.put("authorization", secret);
     guarded.put("session", { id: "s1", token: secret });
+    // A back-reference, the shape that defeated the first implementation: the
+    // raw value came out one level below its own mask.
+    const user = { id: 7, email: secret };
+    user.account = { plan: "pro", owner: user };
+    guarded.put("user", user);
     return {
-      record: JSON.stringify(guarded.winston().transform({ message: "m" })),
+      // inspect, not JSON.stringify: the record legitimately keeps the cycle,
+      // exactly as the context holds it.
+      record: inspect(guarded.winston().transform({ message: "m" }), { depth: 12 }),
       wire: JSON.stringify(guarded.stamp({ orderId: "o-1" })),
       stored: guarded.get("authorization"),
+      viaBackRef: guarded.bindings().user.account.owner.email,
     };
   });
   check(`${label}: a declared path does not reach a log record`, !published.record.includes(secret));
   check(`${label}: a declared path does not cross a boundary`, !published.wire.includes(secret));
+  check(`${label}: a back-reference carries the mask too`, published.viaBackRef === mod.REDACTED);
   check(`${label}: the censor is the published one`, published.record.includes(mod.REDACTED));
   check(`${label}: the store still holds the value`, published.stored === secret);
+
+  // A declared path that names something about a container used to throw
+  // RangeError straight out of the log call.
+  const arrays = new mod.SpawnTrail({ redact: { paths: ["items.length"] } });
+  let survived = true;
+  try {
+    arrays.run(() => {
+      arrays.put("items", ["a", "b"]);
+      arrays.winston().transform({ message: "m" });
+      arrays.snapshot();
+    });
+  } catch {
+    survived = false;
+  }
+  check(`${label}: a path naming a container's own property cannot throw out of a log call`, survived);
 }
 
 // Compile a real consumer against the published types, under the resolution

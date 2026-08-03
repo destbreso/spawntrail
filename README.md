@@ -260,9 +260,19 @@ Four things worth knowing before you rely on it:
 
 A censor that throws yields the default `"[redacted]"` and reports
 `reason: "redaction-failed"`. It is the one place in this package where the safe
-answer is to lose data. Contributors are subject to the same policy, and the
-policy is per instance, because two instances legitimately publish to two
-different places.
+answer is to lose data. A censor receives a value out of the copy being
+published, so `(v) => { delete v.pan; return v }` is a fine way to write one:
+it changes that record and nothing else. Contributors are subject to the same
+policy, and the policy is per instance, because two instances legitimately
+publish to two different places.
+
+Masking happens on the copy rather than on a view over the store, which is what
+makes a back-reference safe. `user.account.owner === user` is an ordinary shape
+for a plain-object graph (a `.lean()` result with a populated back-reference, a
+tree with parent pointers), and the context keeps it, so masking `user.email`
+masks it at `user.account.owner.email` too: there is one node, and it carries
+the mask by every route. A path that names something about a container rather
+than a field in it, `items.length` on an array, matches nothing.
 
 ### Beyond logging
 
@@ -403,7 +413,9 @@ Node 22, one machine, one run, against two contexts: four flat identifiers, and 
 
 **Injection is a copy per log record**, on both integrations. The winston format merges the context into the record only where the record has no value already, so a field set at the call site wins over the ambient one. The pino mixin returns a copy rather than the store, which is what stops pino's default merge strategy (`Object.assign` into whatever the mixin returned) from turning the fields of one log call into permanent context. Roughly a microsecond per line on a nested context, against the two to three a logger already spends serializing it.
 
-**A redaction policy costs what it matches, not what you store.** The walk is driven by the declared paths, so a policy whose paths are absent from the context is free (within measurement noise on both shapes above), and it stays free as the policy grows. A path that does match costs one shallow copy per level of that path, because only the spine down to a masked value is rebuilt and every branch beside it is passed along untouched: about +140 ns for a top-level key on the flat context, about +400 ns for a three-level path on the request-shaped one. Reading a named path with `get()` is unaffected, since nothing is redacted there.
+**A redaction policy costs a copy, and almost nothing for the matching.** Masking happens on a copy of the context rather than on a view over the store, so the price is paid by whichever surface was not already making one. `pino()`, `bindings()` and `bind()` were already copying, so they go from ~230 ns to ~300 ns flat and from ~750 ns to ~1.0 µs request-shaped. The winston format pays more, because without a policy it merges into the record without copying the context at all: ~150 ns to ~460 ns flat, ~690 ns to ~1.6 µs request-shaped. Whether the policy actually matches is worth about 25 ns flat and 100 ns request-shaped, and the policy can grow without moving the number, because the walk visits only declared paths. `get()` on a named path is unaffected, since nothing is redacted there.
+
+The earlier design masked a view over the live store instead and was genuinely cheaper, which is the only argument in its favor. It also republished a back-reference pointing at the unmasked original, handed a censor the store's own node, and escaped the work budget. Correctness at a microsecond beats that.
 
 **`bind()` is the expensive path, on purpose.** The proxy calls the wrapped logger's `child()` on every property access, so `log.info(...)` in a loop allocates a child per call, and the real cost depends on how heavy that logger's `child()` is. Prefer `winston()` or `pino()` where they exist; `bind()` buys universality with allocations.
 

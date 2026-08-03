@@ -42,10 +42,22 @@ fields people naturally put in context are the sensitive ones.
 - **A censor that throws fails closed**, yielding the default censor rather than
   the value. It is the one place in this package where the safe answer is to
   lose data. A censor that returns `undefined` drops the key.
-- **It costs what it matches, not what you store.** The walk is driven by the
-  declared paths, so a policy whose paths are absent is free, and a match
-  rebuilds only the spine down to the masked value: about +140 ns for a
-  top-level key, about +400 ns for a three-level path.
+- **Masking happens on the copy being published**, not on a view over the store.
+  That is what makes a back-reference safe: `user.account.owner === user` is an
+  ordinary shape for a plain-object graph (a `.lean()` result with a populated
+  back-reference, a tree with parent pointers), and the context keeps it, so masking
+  `user.email` masks it at `user.account.owner.email` too, because there is one
+  node and it carries the mask by every route. It is also why a censor may write
+  into the value it is handed: it is changing that record and nothing else.
+- **A path that names something about a container rather than a field in it**,
+  `items.length` on an array, matches nothing rather than throwing.
+- **It costs a copy, and almost nothing for the matching.** `pino()`,
+  `bindings()` and `bind()` were already copying, so ~230 ns becomes ~300 ns on
+  a flat context and ~750 ns becomes ~1.0 µs on a request-shaped one. The
+  winston format pays more, because without a policy it merges into the record
+  without copying the context at all: ~150 ns to ~460 ns, ~690 ns to ~1.6 µs.
+  Whether the policy matches is worth 25 to 100 ns, and it can grow without
+  moving the number.
 
 ## 2.3.0
 

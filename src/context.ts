@@ -178,7 +178,7 @@ export class SpawnTrail {
    * value the application put there itself, and stays raw.
    */
   bindings(): Bindings {
-    const out = clone(this.published());
+    const out = this.publishedCopy();
     this.contribute(out, true);
     return out;
   }
@@ -197,14 +197,22 @@ export class SpawnTrail {
   /**
    * The store as this instance is willing to publish it.
    *
-   * With no policy this IS the store, and with one it is a copy along the
-   * matched paths whose untouched branches are still the store's own nodes. It
-   * is therefore exactly as shared as `target()` and carries the same rule:
-   * every caller copies before handing anything out. There are four of them, and
-   * a fifth must do the same.
+   * With no policy this IS the store, exactly as before redaction existed, and
+   * the caller copies as it always did. With one it is an independent copy with
+   * the declared paths already masked, because redaction masks a copy rather
+   * than rebuilding a view over the live store. The alternative leaked: a
+   * back-reference in the context came out of a partial rebuild still pointing
+   * at the original node, so the raw value was published one level under its own
+   * mask. A copy has one node per node, so masking it masks every route to it.
    */
   private published(): Bindings {
-    return this.policy.apply(this.target());
+    const target = this.target();
+    return this.policy.empty ? target : this.policy.applyInPlace(clone(target));
+  }
+
+  /** The same, always an independent copy, for the callers that hand it out. */
+  private publishedCopy(): Bindings {
+    return this.policy.applyInPlace(clone(this.target()));
   }
 
   /**
@@ -365,7 +373,9 @@ export class SpawnTrail {
    * should have to ask of a log pipeline.
    *
    * Redaction never touches the store: `get("user.email")` still returns the
-   * email. See the note there for why.
+   * email. See the note there for why. Masking happens on the copy being
+   * published, so a censor may write into the value it is handed, and a
+   * back-reference in the context carries the mask by every route to it.
    */
   redact(options: RedactOptions): this {
     this.policy.add(options);
@@ -387,7 +397,11 @@ export class SpawnTrail {
       } catch {
         continue;
       }
-      if (extra) mergeMissing(into, redact ? this.policy.apply(extra) : extra);
+      if (!extra) continue;
+      // A contributor's object belongs to whoever wrote the contributor, so a
+      // policy masks a copy of it rather than the thing they handed over.
+      const masked = redact && !this.policy.empty ? this.policy.applyInPlace(clone(extra)) : extra;
+      mergeMissing(into, masked);
     }
   }
 
@@ -551,7 +565,7 @@ export class SpawnTrail {
    */
   pino(): () => Bindings {
     return () => {
-      const out = clone(this.published());
+      const out = this.publishedCopy();
       this.contribute(out, true);
       return out;
     };
@@ -572,7 +586,7 @@ export class SpawnTrail {
         if (prop === "child" || typeof prop === "symbol") {
           return Reflect.get(target, prop, receiver);
         }
-        const bindings = clone(scope.published());
+        const bindings = scope.publishedCopy();
         scope.contribute(bindings, true);
         const child = target.child(bindings);
         const value = Reflect.get(child, prop, child);

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.5.1
+
+Documentation. No runtime change: the code is 2.5.0's.
+
+- **"Where the fields end up"**, on the half of the pipeline that starts where
+  this package stops: that a logger-level winston format enriches every
+  transport including one carrying a format of its own, what reaches CloudWatch
+  Logs Insights and Kibana and how to query it there, and which serializations
+  drop the fields again.
+- **"Beyond logging" covers the records you write yourself**, an audit table or
+  an outbox, where `bindings()` being a publish is the wrong read and a named
+  `get()` is the right one, plus carrying the correlation id to the next service
+  over a header.
+- **`trace_id` and `span_id` are OpenTelemetry's names, not ECS's.** The docs
+  claimed both conventions agreed, so the one recommendation aimed at Elastic
+  readers was the wrong one. The Elastic Common Schema spells them `trace.id`
+  and `span.id`, which `otel()` has always been able to emit and now says so. A
+  test pins what makes that work: a contributed key is a KEY, so a dot in it
+  stays literal instead of nesting.
+
 ## 2.5.0
 
 An optional shape. The open bag is right for the first three lines and wrong for
@@ -77,21 +97,6 @@ string. This is that, opt in, with the bag still the default.
 Both of those had been shipping for versions, and neither was caught because
 `tsconfig.json` excluded `test`, so `tsc` had never once looked at the file that
 uses this package the way a consumer does.
-
-### Documentation
-
-- **"Where the fields end up"**, on the half of the pipeline that starts where
-  this package stops: that a logger-level winston format enriches every
-  transport including one with a format of its own, what reaches CloudWatch Logs
-  Insights and Kibana and how to query it there, and which serializations drop
-  the fields again.
-- **"Beyond logging" covers the records you write yourself**, an audit table or
-  an outbox, where `bindings()` being a publish is the wrong read and a named
-  `get()` is the right one, plus carrying the correlation id to the next
-  service over a header.
-- **`trace_id` and `span_id` are OpenTelemetry's names, not ECS's.** The docs
-  claimed both conventions agreed. ECS spells them `trace.id` and `span.id`,
-  which `otel()` has always been able to emit and now says so.
 
 ## 2.4.1
 
